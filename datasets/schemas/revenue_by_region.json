@@ -1,0 +1,15 @@
+{
+  "name": "revenue_by_region",
+  "description": "Monthly net revenue per sales region and product category, built from orders, customers and catalog.",
+  "owner_team": "Finance analytics",
+  "tags": ["finance", "aggregate", "derived"],
+  "primary_key": ["month", "region", "category"],
+  "columns": [
+    {"name": "month", "type": "string", "required": true, "description": "YYYY-MM"},
+    {"name": "region", "type": "string", "required": true, "description": "Sales region"},
+    {"name": "category", "type": "string", "required": true, "description": "Product family"},
+    {"name": "orders", "type": "integer", "required": true, "description": "Distinct orders"},
+    {"name": "units", "type": "integer", "required": true, "description": "Units sold"},
+    {"name": "net_revenue", "type": "decimal", "required": true, "description": "Delivered and shipped revenue, USD"}
+  ]
+}

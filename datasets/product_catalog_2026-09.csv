@@ -1,0 +1,37 @@
+sku,product_name,category,list_price,active
+SEN-107,Sensor A10,Sensors,119.76,true
+SEN-114,Sensor B20,Sensors,124.75,true
+SEN-121,Sensor C30,Sensors,64.55,true
+SEN-128,Sensor D40,Sensors,157.99,true
+SEN-135,Sensor E50,Sensors,44.79,true
+SEN-142,Sensor F60,Sensors,162.22,true
+GAT-107,Gateway A10,Gateways,299.92,true
+GAT-114,Gateway B20,Gateways,426.34,true
+GAT-121,Gateway C30,Gateways,572.69,true
+GAT-128,Gateway D40,Gateways,635.77,true
+GAT-135,Gateway E50,Gateways,507.4,true
+GAT-142,Gateway F60,Gateways,262.32,true
+STO-107,Storage array A10,Storage,228.44,true
+STO-114,Storage array B20,Storage,211.38,true
+STO-121,Storage array C30,Storage,378.56,true
+STO-128,Storage array D40,Storage,134.66,true
+STO-135,Storage array E50,Storage,282.7,true
+STO-142,Storage array F60,Storage,379.4,true
+SOF-107,Software licence A10,Software,558.2,true
+SOF-114,Software licence B20,Software,826.75,true
+SOF-121,Software licence C30,Software,886.36,true
+SOF-128,Software licence D40,Software,835.31,true
+SOF-135,Software licence E50,Software,614.42,true
+SOF-142,Software licence F60,Software,449.18,true
+SER-107,Service plan A10,Services,507.85,true
+SER-114,Service plan B20,Services,422.77,true
+SER-121,Service plan C30,Services,1099.28,true
+SER-128,Service plan D40,Services,209.36,true
+SER-135,Service plan E50,Services,565.03,true
+SER-142,Service plan F60,Services,1165.13,true
+ACC-107,Accessory kit A10,Accessories,50.61,true
+ACC-114,Accessory kit B20,Accessories,13.92,true
+ACC-121,Accessory kit C30,Accessories,34.42,true
+ACC-128,Accessory kit D40,Accessories,49.1,true
+ACC-135,Accessory kit E50,Accessories,35.43,true
+ACC-142,Accessory kit F60,Accessories,59.36,true

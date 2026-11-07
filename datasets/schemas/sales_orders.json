@@ -1,0 +1,17 @@
+{
+  "name": "sales_orders",
+  "description": "Order lines extracted nightly from the order management system.",
+  "owner_team": "Sales operations",
+  "tags": ["orders", "transactions"],
+  "primary_key": ["order_id"],
+  "columns": [
+    {"name": "order_id", "type": "integer", "required": true, "description": "Order number"},
+    {"name": "customer_id", "type": "integer", "required": true, "description": "References crm_customers"},
+    {"name": "order_date", "type": "date", "required": true, "description": "Booking date"},
+    {"name": "sku", "type": "string", "required": true, "description": "References product_catalog"},
+    {"name": "quantity", "type": "integer", "required": true, "description": "Units ordered"},
+    {"name": "unit_price", "type": "decimal", "required": true, "description": "Net unit price after discount"},
+    {"name": "currency", "type": "string", "required": true, "description": "ISO 4217 code"},
+    {"name": "status", "type": "string", "required": true, "description": "delivered, shipped, returned or cancelled"}
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "product_catalog",
+  "description": "Published price list.",
+  "owner_team": "Sales operations",
+  "tags": ["catalog", "reference-data"],
+  "primary_key": ["sku"],
+  "columns": [
+    {"name": "sku", "type": "string", "required": true, "description": "Stock keeping unit"},
+    {"name": "product_name", "type": "string", "required": true, "description": "Display name"},
+    {"name": "category", "type": "string", "required": true, "description": "Product family"},
+    {"name": "list_price", "type": "decimal", "required": true, "description": "List price in USD"},
+    {"name": "active", "type": "boolean", "required": true, "description": "Currently sold"}
+  ]
+}

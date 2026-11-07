@@ -1,0 +1,16 @@
+{
+  "name": "crm_customers",
+  "description": "Customer master from the CRM: one row per billing account.",
+  "owner_team": "Sales operations",
+  "tags": ["crm", "master-data", "pii"],
+  "primary_key": ["customer_id"],
+  "columns": [
+    {"name": "customer_id", "type": "integer", "required": true, "description": "CRM account id"},
+    {"name": "company_name", "type": "string", "required": true, "description": "Legal entity name"},
+    {"name": "contact_email", "type": "string", "required": true, "pii": true, "description": "Primary billing contact"},
+    {"name": "country", "type": "string", "required": true, "description": "Billing country"},
+    {"name": "region", "type": "string", "required": true, "description": "Sales region"},
+    {"name": "segment", "type": "string", "required": true, "description": "Enterprise, Mid-market or SMB"},
+    {"name": "signup_date", "type": "date", "required": true, "description": "First contract date"}
+  ]
+}
