@@ -1,0 +1,6 @@
+stateDiagram-v2
+  [*] --> Active: commitVersion
+  Active --> Deprecated: superseded
+  Active --> Withdrawn: faulty or erased
+  Deprecated --> Withdrawn
+  Withdrawn --> [*]

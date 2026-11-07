@@ -1,0 +1,15 @@
+sequenceDiagram
+  autonumber
+  participant P as Publisher (wallet)
+  participant G as Gateway API
+  participant S as Object store
+  participant R as DataRegistry
+  participant I as Indexer
+  P->>G: POST /api/datasets/{id}/objects (file, EIP-191 signature)
+  G->>R: canManage(id, signer)?
+  G->>G: parse with schema, canonical records, Merkle tree, SHA-256
+  G->>S: put(AES-256-GCM sealed bytes)
+  G-->>P: merkleRoot, contentHash, recordCount, storageURI
+  P->>R: commitVersion(id, input, parents) (signed tx)
+  R-->>I: VersionCommitted, LineageLinked
+  I->>I: link object to version, check roots match (anchored or mismatch)

@@ -1,0 +1,10 @@
+sequenceDiagram
+  participant C as Consumer
+  participant G as Gateway API
+  participant X as Anyone
+  participant R as DataRegistry
+  C->>G: GET /records/{index} (signed, needs access)
+  G-->>C: canonical record + Merkle proof
+  C->>X: shares record and proof
+  X->>R: verifyRecord(id, version, index, record, proof) [view call]
+  R-->>X: true / false

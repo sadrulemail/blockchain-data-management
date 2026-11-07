@@ -1,0 +1,32 @@
+flowchart LR
+  subgraph Actors
+    PUB[Publishers<br/>owners and stewards]
+    CON[Consumers]
+    AUD[Quality auditors]
+    ANY[Anyone<br/>verifying data]
+  end
+  subgraph Chain["EVM chain"]
+    DR[DataRegistry<br/>datasets, versions, lineage]
+    AL[AccessLedger<br/>requests, grants, read log]
+    QL[QualityLedger<br/>attestations]
+  end
+  subgraph Service["Data service (Python)"]
+    API[FastAPI gateway<br/>signed requests]
+    IDX[Event indexer]
+    DB[(SQL read models<br/>objects, documents)]
+    OBJ[(Encrypted object store)]
+    WEB[Web console]
+  end
+  PUB -- "register, commit, grant (tx)" --> DR
+  PUB -- "upload file (signed)" --> API
+  CON -- "request access (tx)" --> AL
+  CON -- "download, prove (signed)" --> API
+  AUD -- "read, attest (tx)" --> QL
+  ANY -- "verify file or record" --> API
+  API -- "hasAccess, logAccess, verifyRecord" --> AL
+  API --> DR
+  API --> OBJ
+  API --> DB
+  IDX -- "eth_getLogs" --> Chain
+  IDX --> DB
+  WEB --> API

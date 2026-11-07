@@ -1,0 +1,14 @@
+sequenceDiagram
+  autonumber
+  participant C as Consumer (wallet)
+  participant A as AccessLedger
+  participant O as Owner
+  participant G as Gateway API
+  C->>A: requestAccess(id, purpose)
+  O->>A: approveRequest(requestId, 90 days)
+  C->>G: GET /download (signed)
+  G->>A: hasAccess(id, consumer) [live call]
+  G->>G: decrypt, check SHA-256 and Merkle root against chain
+  G->>A: logAccess(id, version, consumer, receipt)
+  A-->>A: recheck access, emit DataAccessed
+  G-->>C: file + X-DL-Content-Hash, X-DL-Merkle-Root, X-DL-Receipt, X-DL-Access-Tx

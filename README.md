@@ -14,7 +14,7 @@ between datasets, purpose-bound access grants, a log of every read, and independ
 | **Indexer** | Event-sourced read models in SQL, rebuilt from chain logs, re-org aware |
 | **Console** | Dependency-free web console: catalogue, versions, lineage graph, access, audit trail, verification |
 | **Cryptography** | Keccak-256 Merkle trees (OpenZeppelin compatible), SHA-256 file fingerprints, AES-256-GCM with per-object keys, EIP-191 request signatures |
-| **Quality gates** | 147 automated tests across both languages, end-to-end runs against a real local chain, CI on every push |
+| **Quality gates** | 147 automated tests across both languages, end-to-end runs against a real local chain |
 
 ---
 
@@ -78,23 +78,10 @@ transaction:
 - **Merkle root over records**: every row is turned into a *canonical record*, hashed into a leaf, and the leaves
   are folded into a binary Merkle tree. The 32-byte root commits to every record and its position.
 
-```mermaid
-flowchart BT
-  r0["record 0<br/>{order_id:700001,...}"] --> l0["leaf 0"]
-  r1["record 1"] --> l1["leaf 1"]
-  r2["record 2"] --> l2["leaf 2"]
-  r3["record 3"] --> l3["leaf 3"]
-  r4["record 4"] --> l4["leaf 4"]
-  l0 --> n01["H(leaf0, leaf1)"]
-  l1 --> n01
-  l2 --> n23["H(leaf2, leaf3)"]
-  l3 --> n23
-  l4 --> n4["leaf 4 (promoted)"]
-  n01 --> n03["H(n01, n23)"]
-  n23 --> n03
-  n03 --> root["Merkle root<br/>stored in DataRegistry"]
-  n4 --> root
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/merkle-tree-dark.png">
+  <img src="docs/diagrams/merkle-tree.png" width="953" alt="Merkle tree: five records are hashed into leaves, paired level by level, and the root is stored in DataRegistry">
+</picture>
 
 **Canonical records.** Two files can hold the same data and still differ byte for byte (`12.50` vs `12.5`,
 column order, CRLF vs LF, a leading zero in an id). Before hashing, every row is normalised against the dataset
@@ -134,14 +121,10 @@ were removed, by comparing leaves with the anchored tree.
 Versions are immutable. A correction is a new version, never an edit. Each version carries its own schema hash
 (schema evolution is visible on-chain through `SchemaChanged`) and moves through a one-way lifecycle:
 
-```mermaid
-stateDiagram-v2
-  [*] --> Active: commitVersion
-  Active --> Deprecated: superseded
-  Active --> Withdrawn: faulty or erased
-  Deprecated --> Withdrawn
-  Withdrawn --> [*]
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/version-lifecycle-dark.png">
+  <img src="docs/diagrams/version-lifecycle.png" width="275" alt="Version lifecycle: Active becomes Deprecated when superseded; Active or Deprecated can be Withdrawn, which is final">
+</picture>
 
 *Deprecated* versions are still served and still valid as lineage parents. *Withdrawn* versions are never served
 again by the gateway and can no longer be used as parents or attested. Datasets can be archived (closed for new
@@ -222,40 +205,10 @@ configurable confirmation depth trades freshness for stability on public network
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  subgraph Actors
-    PUB[Publishers<br/>owners and stewards]
-    CON[Consumers]
-    AUD[Quality auditors]
-    ANY[Anyone<br/>verifying data]
-  end
-  subgraph Chain["EVM chain"]
-    DR[DataRegistry<br/>datasets, versions, lineage]
-    AL[AccessLedger<br/>requests, grants, read log]
-    QL[QualityLedger<br/>attestations]
-  end
-  subgraph Service["Data service (Python)"]
-    API[FastAPI gateway<br/>signed requests]
-    IDX[Event indexer]
-    DB[(SQL read models<br/>objects, documents)]
-    OBJ[(Encrypted object store)]
-    WEB[Web console]
-  end
-  PUB -- "register, commit, grant (tx)" --> DR
-  PUB -- "upload file (signed)" --> API
-  CON -- "request access (tx)" --> AL
-  CON -- "download, prove (signed)" --> API
-  AUD -- "read, attest (tx)" --> QL
-  ANY -- "verify file or record" --> API
-  API -- "hasAccess, logAccess, verifyRecord" --> AL
-  API --> DR
-  API --> OBJ
-  API --> DB
-  IDX -- "eth_getLogs" --> Chain
-  IDX --> DB
-  WEB --> API
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/architecture-dark.png">
+  <img src="docs/diagrams/architecture.png" width="1250" alt="Architecture: publishers, consumers, auditors and verifiers use signed transactions to the contracts and signed requests to the Python data service">
+</picture>
 
 Writes that change governance state (registering, committing, granting, attesting) are signed by the actor's own
 wallet and go straight to the chain. The service never holds those keys. It holds one key of its own, the
@@ -267,57 +220,24 @@ gateway key, whose only power is to log reads.
 
 ### Publishing a version
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant P as Publisher (wallet)
-  participant G as Gateway API
-  participant S as Object store
-  participant R as DataRegistry
-  participant I as Indexer
-  P->>G: POST /api/datasets/{id}/objects (file, EIP-191 signature)
-  G->>R: canManage(id, signer)?
-  G->>G: parse with schema, canonical records, Merkle tree, SHA-256
-  G->>S: put(AES-256-GCM sealed bytes)
-  G-->>P: merkleRoot, contentHash, recordCount, storageURI
-  P->>R: commitVersion(id, input, parents) (signed tx)
-  R-->>I: VersionCommitted, LineageLinked
-  I->>I: link object to version, check roots match (anchored or mismatch)
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/publish-flow-dark.png">
+  <img src="docs/diagrams/publish-flow.png" width="1686" alt="Publishing a version: upload to the gateway, schema parse, Merkle tree and SHA-256, encrypted storage, commitVersion on-chain, then indexing">
+</picture>
 
 ### Reading data under a grant
 
-```mermaid
-sequenceDiagram
-  autonumber
-  participant C as Consumer (wallet)
-  participant A as AccessLedger
-  participant O as Owner
-  participant G as Gateway API
-  C->>A: requestAccess(id, purpose)
-  O->>A: approveRequest(requestId, 90 days)
-  C->>G: GET /download (signed)
-  G->>A: hasAccess(id, consumer) [live call]
-  G->>G: decrypt, check SHA-256 and Merkle root against chain
-  G->>A: logAccess(id, version, consumer, receipt)
-  A-->>A: recheck access, emit DataAccessed
-  G-->>C: file + X-DL-Content-Hash, X-DL-Merkle-Root, X-DL-Receipt, X-DL-Access-Tx
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/read-flow-dark.png">
+  <img src="docs/diagrams/read-flow.png" width="1166" alt="Reading under a grant: request and approval on AccessLedger, signed download, live access check, integrity checks and an on-chain read log">
+</picture>
 
 ### Verifying a single record
 
-```mermaid
-sequenceDiagram
-  participant C as Consumer
-  participant G as Gateway API
-  participant X as Anyone
-  participant R as DataRegistry
-  C->>G: GET /records/{index} (signed, needs access)
-  G-->>C: canonical record + Merkle proof
-  C->>X: shares record and proof
-  X->>R: verifyRecord(id, version, index, record, proof) [view call]
-  R-->>X: true / false
-```
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/record-proof-dark.png">
+  <img src="docs/diagrams/record-proof.png" width="1300" alt="Verifying a single record: the consumer receives a record and its Merkle proof, and anyone checks it with DataRegistry.verifyRecord">
+</picture>
 
 ---
 
@@ -590,8 +510,7 @@ uv run dataledger verify-file --file ../datasets/sales_orders_2026-10.csv
 | End-to-end tests | 19 | Real anvil chain per run: publish, gated reads, on-chain proof checks, file verification, diffs, storage tampering, lineage, attestations, conflict of interest, withdrawal and crypto-shredding, key rotation, indexer rebuild and re-org recovery |
 
 Contract coverage is 100% of lines, statements, branches and functions (`forge coverage`). Python line coverage
-is 83%. CI runs formatting, build, all tests, lint, and checks that the ABIs bundled in the service match the
-compiled contracts.
+is 83%.
 
 ```bash
 cd contracts && forge test && forge coverage --report summary --no-match-coverage "(test|script)"
@@ -664,9 +583,11 @@ blockchain-data-management/
 │   ├── generate_datasets.py      deterministic reference data
 │   ├── load_reference_data.py    full governance cycle against a running platform
 │   ├── export_abi.py             copy ABIs from the Foundry build into the service
-│   └── capture_screenshots.py    console screenshots for this README
-├── docs/screenshots/
-└── .github/workflows/ci.yml
+│   ├── capture_screenshots.py    console screenshots for this README
+│   └── render_diagrams.py        README diagrams from docs/diagrams/*.mmd
+└── docs/
+    ├── diagrams/                 Mermaid sources and rendered light/dark PNGs
+    └── screenshots/
 ```
 
 ## License

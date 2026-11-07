@@ -1,0 +1,15 @@
+flowchart BT
+  r0["record 0<br/>{order_id:700001,...}"] --> l0["leaf 0"]
+  r1["record 1"] --> l1["leaf 1"]
+  r2["record 2"] --> l2["leaf 2"]
+  r3["record 3"] --> l3["leaf 3"]
+  r4["record 4"] --> l4["leaf 4"]
+  l0 --> n01["H(leaf0, leaf1)"]
+  l1 --> n01
+  l2 --> n23["H(leaf2, leaf3)"]
+  l3 --> n23
+  l4 --> n4["leaf 4 (promoted)"]
+  n01 --> n03["H(n01, n23)"]
+  n23 --> n03
+  n03 --> root["Merkle root<br/>stored in DataRegistry"]
+  n4 --> root
