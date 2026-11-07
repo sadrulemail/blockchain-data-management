@@ -1,0 +1,20 @@
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/deployments/31337.json
+
+# Python service
+service/.venv/
+service/var/
+service/.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
