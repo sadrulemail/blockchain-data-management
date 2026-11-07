@@ -1,0 +1,54 @@
+[project]
+name = "dataledger"
+version = "1.0.0"
+description = "Off-chain data service for the blockchain data management platform: anchoring, encryption, indexing and access gateway."
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Sadrul" }]
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "python-multipart>=0.0.12",
+  "web3>=7.6,<8",
+  "eth-account>=0.13",
+  "cryptography>=43",
+  "sqlalchemy>=2.0.36",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "typer>=0.13",
+  "httpx>=0.28",
+]
+
+[project.scripts]
+dataledger = "dataledger.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3", "ruff>=0.8"]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dataledger"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["chain: needs anvil and compiled contracts"]
+filterwarnings = [
+  "ignore::DeprecationWarning:websockets.*",
+  "ignore:Using `httpx` with `starlette.testclient`",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "N", "S"]
+ignore = ["S101", "S311", "RUF001", "N818"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108", "S603", "S607"]
