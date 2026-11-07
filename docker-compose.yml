@@ -1,0 +1,88 @@
+# The whole platform from the Docker Hub images: a local chain, the contract deployment and the data service
+# with its web console on http://localhost:8000.
+#
+#   docker compose up -d
+#   docker compose --profile reference-data run --rm reference-data    # optional: play the governance scenario
+#   docker compose down -v                                              # stop and delete every volume
+#
+# The private keys below are anvil's public development accounts; they only hold value on this local chain.
+
+name: dataledger
+
+x-contracts: &contracts
+  image: sadrulemail/dataledger-contracts:${DATALEDGER_TAG:-1.0.0}
+  build:
+    context: .
+    target: contracts
+
+x-service: &service
+  image: sadrulemail/dataledger:${DATALEDGER_TAG:-1.0.0}
+  build:
+    context: .
+    target: service
+
+services:
+  chain:
+    <<: *contracts
+    command: ["chain"]
+    ports: ["8545:8545"]
+    volumes: ["chain:/data"]
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://127.0.0.1:8545"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  deploy:
+    <<: *contracts
+    command: ["deploy"]
+    environment:
+      RPC_URL: http://chain:8545
+      DEPLOYER_PRIVATE_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      GATEWAY_ADDRESS: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
+      AUDITOR_ADDRESS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
+      PUBLISHER_ADDRESSES: "0x90F79bf6EB2c4f870365E785982E1f101E93b906,0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
+    volumes: ["deployments:/app/deployments"]
+    depends_on:
+      chain:
+        condition: service_healthy
+
+  api:
+    <<: *service
+    environment:
+      DATALEDGER_RPC_URL: http://chain:8545
+      # Empty: the entry point keeps a generated key ring in the data volume. Set it to use your own keys.
+      DATALEDGER_MASTER_KEYS: ${DATALEDGER_MASTER_KEYS:-}
+      DATALEDGER_GATEWAY_PRIVATE_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+    ports: ["8000:8000"]
+    volumes:
+      - data:/data
+      - deployments:/deployments:ro
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  reference-data:
+    <<: *service
+    profiles: ["reference-data"]
+    command: ["python", "/app/scripts/load_reference_data.py"]
+    environment:
+      DATALEDGER_RPC_URL: http://chain:8545
+      DATALEDGER_API_URL: http://api:8000
+    volumes: ["deployments:/deployments:ro"]
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  chain:
+  deployments:
+  data:

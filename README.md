@@ -15,6 +15,7 @@ between datasets, purpose-bound access grants, a log of every read, and independ
 | **Console** | Dependency-free web console: catalogue, versions, lineage graph, access, audit trail, verification |
 | **Cryptography** | Keccak-256 Merkle trees (OpenZeppelin compatible), SHA-256 file fingerprints, AES-256-GCM with per-object keys, EIP-191 request signatures |
 | **Quality gates** | 147 automated tests across both languages, end-to-end runs against a real local chain |
+| **Docker** | Images on Docker Hub: [`sadrulemail/dataledger`](https://hub.docker.com/r/sadrulemail/dataledger) and [`sadrulemail/dataledger-contracts`](https://hub.docker.com/r/sadrulemail/dataledger-contracts); one `docker compose up` runs the chain, the deployment, the API and the console |
 
 ---
 
@@ -28,11 +29,12 @@ between datasets, purpose-bound access grants, a log of every read, and independ
 6. [Data service and API](#data-service-and-api)
 7. [Reference scenario](#reference-scenario)
 8. [Screens](#screens)
-9. [Run it locally](#run-it-locally)
-10. [Quality gates](#quality-gates)
-11. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
-12. [Taking it to production](#taking-it-to-production)
-13. [Project structure](#project-structure)
+9. [Run with Docker](#run-with-docker)
+10. [Run it locally](#run-it-locally)
+11. [Quality gates](#quality-gates)
+12. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+13. [Taking it to production](#taking-it-to-production)
+14. [Project structure](#project-structure)
 
 ---
 
@@ -403,6 +405,54 @@ checked against the contract.
 
 ---
 
+## Run with Docker
+
+The platform is published as two images on Docker Hub (linux/amd64, tags `1.0.0` and `latest`):
+
+| Image | Contents |
+|---|---|
+| [`sadrulemail/dataledger`](https://hub.docker.com/r/sadrulemail/dataledger) | Data service: API gateway, event indexer, web console and CLI, plus the reference datasets |
+| [`sadrulemail/dataledger-contracts`](https://hub.docker.com/r/sadrulemail/dataledger-contracts) | The three ledgers compiled with Foundry: runs a local chain (`chain`) or deploys to any RPC endpoint (`deploy`) |
+
+[`docker-compose.yml`](docker-compose.yml) is all you need. It starts a local chain, deploys the ledgers, then
+starts the service once the deployment has finished:
+
+```bash
+docker compose up -d
+```
+
+Play the reference scenario (optional), then open the console at <http://localhost:8000>:
+
+```bash
+docker compose --profile reference-data run --rm reference-data
+```
+
+The CLI runs inside the service container:
+
+```bash
+docker compose exec api dataledger verify-file --file /app/datasets/sales_orders_2026-10.csv
+```
+
+Stop the stack and delete every volume:
+
+```bash
+docker compose down -v
+```
+
+- **State survives restarts.** The chain keeps its state in the `chain` volume and the deploy step is skipped
+  when the ledgers already exist, so `docker compose down` followed by `up` brings back the same chain, data and
+  read models.
+- **Keys.** Without `DATALEDGER_MASTER_KEYS`, the service generates a key ring and keeps it in its data volume.
+  That is convenient on a laptop, but anyone holding the volume then holds both the ciphertext and the key.
+  Anywhere else, inject the keys from a secret store, either as `DATALEDGER_MASTER_KEYS` or as a mounted file
+  named in `DATALEDGER_MASTER_KEYS_FILE`.
+- **Other chains.** Run the contracts image with `deploy`, set `RPC_URL` and `DEPLOYER_PRIVATE_KEY`, and mount
+  `/app/deployments` to collect `<chainId>.json`. Point the service's `DATALEDGER_DEPLOYMENT_FILE` at that file.
+- **Building from source.** `docker compose build`, or the `docker build --target` commands at the top of the
+  [`Dockerfile`](Dockerfile).
+
+---
+
 ## Run it locally
 
 ### Prerequisites
@@ -567,6 +617,9 @@ default; the SQL layer is SQLAlchemy Core with dialect-aware upserts for Postgre
 
 ```text
 blockchain-data-management/
+├── Dockerfile                    service and contracts images (one target each)
+├── docker-compose.yml            chain, deployment, service and reference scenario
+├── docker/                       image entry points
 ├── contracts/                    Foundry project
 │   ├── src/
 │   │   ├── DataRegistry.sol      datasets, versions, lineage, record proofs
