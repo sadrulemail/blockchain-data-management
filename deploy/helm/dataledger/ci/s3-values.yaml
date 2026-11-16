@@ -1,0 +1,25 @@
+# Lint profile: S3 objects, two API replicas, ingress with TLS, ServiceMonitor and NetworkPolicy.
+chain:
+  rpcUrl: https://sepolia.base.org
+  deployment:
+    chainId: 84532
+    startBlock: 18000000
+    dataRegistry: "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+    accessLedger: "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512"
+    qualityLedger: "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0"
+secrets:
+  existingSecret: dataledger-runtime
+objectStore:
+  type: s3
+  s3: { bucket: dataledger-objects, region: eu-west-1 }
+api:
+  autoscaling: { enabled: true }
+  corsOrigins: ["https://console.example.com"]
+ingress:
+  enabled: true
+  className: nginx
+  tls: [{ hosts: [dataledger.example.com], secretName: dataledger-tls }]
+metrics:
+  serviceMonitor: { enabled: true }
+networkPolicy:
+  enabled: true

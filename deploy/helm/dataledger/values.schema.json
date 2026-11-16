@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "DataLedger chart values",
+  "type": "object",
+  "required": ["image", "chain", "secrets", "objectStore", "api"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "digest": { "type": "string", "pattern": "^$|^sha256:[0-9a-f]{64}$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "chain": {
+      "type": "object",
+      "required": ["rpcUrl", "deployment"],
+      "properties": {
+        "rpcUrl": { "type": "string" },
+        "confirmations": { "type": "integer", "minimum": 0 },
+        "deployment": {
+          "type": "object",
+          "required": ["chainId", "dataRegistry", "accessLedger", "qualityLedger"],
+          "properties": {
+            "chainId": { "type": "integer", "minimum": 1 },
+            "startBlock": { "type": "integer", "minimum": 0 },
+            "dataRegistry": { "type": "string", "pattern": "^$|^0x[0-9a-fA-F]{40}$" },
+            "accessLedger": { "type": "string", "pattern": "^$|^0x[0-9a-fA-F]{40}$" },
+            "qualityLedger": { "type": "string", "pattern": "^$|^0x[0-9a-fA-F]{40}$" }
+          }
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "existingSecret": { "type": "string" },
+        "keys": {
+          "type": "object",
+          "required": ["databaseUrl", "masterKeys", "gatewayPrivateKey"]
+        }
+      }
+    },
+    "objectStore": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["s3", "local"] }
+      }
+    },
+    "api": {
+      "type": "object",
+      "properties": {
+        "replicas": { "type": "integer", "minimum": 1 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "corsOrigins": { "type": "array", "items": { "type": "string" } },
+        "maxUploadMb": { "type": "integer", "minimum": 1, "maximum": 2048 },
+        "relay": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "maxPerHour": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "indexer": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "metricsPort": { "type": "integer", "minimum": 1, "maximum": 65535 }
+      }
+    },
+    "logFormat": { "enum": ["json", "text"] },
+    "logLevel": { "enum": ["DEBUG", "INFO", "WARNING", "ERROR"] }
+  }
+}

@@ -1,0 +1,123 @@
+# DataLedger service. The chart runs the off-chain half; it expects:
+#   - an EVM JSON-RPC endpoint with the ledgers deployed (contracts/script/Deploy.s.sol),
+#   - PostgreSQL for the read models,
+#   - an S3-compatible bucket for encrypted objects (or a volume, for a single replica),
+#   - a Secret with the database URL, the key-encryption keys and the gateway signer.
+
+image:
+  repository: sadrulemail/dataledger
+  tag: ""          # defaults to the chart appVersion
+  digest: ""       # sha256:... pins the image; wins over the tag
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+chain:
+  rpcUrl: ""                 # required, e.g. https://sepolia.base.org or a private node
+  confirmations: 2           # blocks to wait before indexing; match the chain's finality
+  # Contents of deployments/<chainId>.json written by the deploy script.
+  deployment:
+    chainId: 31337
+    startBlock: 0
+    dataRegistry: ""
+    accessLedger: ""
+    qualityLedger: ""
+
+# Secret holding sensitive settings. With existingSecret set, the chart creates none; the Secret must contain
+# the keys named below (an External Secrets Operator or Sealed Secrets object fits here).
+secrets:
+  existingSecret: ""
+  keys:
+    databaseUrl: database-url          # postgresql+psycopg://user:password@host:5432/dataledger
+    masterKeys: master-keys            # kid:base64key[,kid:base64key], newest first
+    gatewayPrivateKey: gateway-private-key
+  # Only used when existingSecret is empty. Prefer existingSecret outside a test cluster.
+  databaseUrl: ""
+  masterKeys: ""
+  gatewayPrivateKey: ""
+
+objectStore:
+  type: s3                 # s3 | local
+  s3:
+    bucket: ""
+    prefix: objects
+    region: ""
+    endpointUrl: ""        # S3-compatible services (MinIO, Ceph, R2)
+  # type=local keeps objects on a ReadWriteOnce volume, which limits the API to one replica.
+  persistence:
+    size: 20Gi
+    storageClass: ""
+
+api:
+  replicas: 2
+  port: 8000
+  corsOrigins: []          # e.g. ["https://console.example.com"]
+  relay:
+    enabled: true
+    maxPerHour: 60
+  maxUploadMb: 50
+  resources:
+    requests: { cpu: 250m, memory: 384Mi }
+    limits: { memory: 1Gi }
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  extraEnv: []
+
+indexer:
+  enabled: true
+  metricsPort: 9100
+  pollSeconds: 1
+  batchBlocks: 2000
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 512Mi }
+  extraEnv: []
+
+logFormat: json
+logLevel: INFO
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: dataledger.example.com
+      paths: [{ path: /, pathType: Prefix }]
+  tls: []
+  # Sets DATALEDGER_HSTS so the API sends Strict-Transport-Security; use it when the ingress terminates TLS.
+  hsts: true
+
+metrics:
+  serviceMonitor:
+    enabled: false         # needs the Prometheus Operator CRDs
+    interval: 30s
+    labels: {}
+
+networkPolicy:
+  enabled: false
+  # Egress stays open (RPC, PostgreSQL and S3 are usually outside the cluster); ingress is limited to the API
+  # port and the metrics ports.
+  ingressFrom: []          # extra peers, e.g. [{ namespaceSelector: { matchLabels: { name: ingress-nginx } } }]
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}          # e.g. eks.amazonaws.com/role-arn for S3 access through IRSA
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

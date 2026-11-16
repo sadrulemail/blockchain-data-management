@@ -1,0 +1,23 @@
+DataLedger {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}".
+
+Gateway API and web console:
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}/
+{{- end }}
+{{- else }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "dataledger.fullname" . }}-api 8000:{{ .Values.service.port }}
+  then open http://127.0.0.1:8000/ (OpenAPI reference at /docs)
+{{- end }}
+
+Chain: {{ .Values.chain.rpcUrl }} (chain id {{ .Values.chain.deployment.chainId }}), AccessLedger {{ .Values.chain.deployment.accessLedger }}
+Object store: {{ .Values.objectStore.type }}{{ if eq .Values.objectStore.type "s3" }} (bucket {{ .Values.objectStore.s3.bucket }}){{ end }}
+{{- if not .Values.secrets.existingSecret }}
+
+The chart created a Secret from plain values. Outside a test cluster, keep the database URL, key-encryption keys
+and gateway key in a secret manager and pass its Secret with secrets.existingSecret.
+{{- end }}
+{{- if not .Values.secrets.gatewayPrivateKey }}{{ if not .Values.secrets.existingSecret }}
+
+No gateway key is set: reads are served but not logged on-chain, and gasless access requests are not relayed.
+{{- end }}{{ end }}

@@ -1,31 +1,51 @@
-# The whole platform from the Docker Hub images: a local chain, the contract deployment and the data service
-# with its web console on http://localhost:8000.
+# The whole platform from the Docker Hub images: a local chain, the contract deployment, PostgreSQL, schema
+# migrations, the gateway API with its web console on http://localhost:8000 and the event indexer.
 #
 #   docker compose up -d
 #   docker compose --profile reference-data run --rm reference-data    # optional: play the governance scenario
+#   docker compose --profile observability up -d                        # Prometheus :9090 and Grafana :3000
 #   docker compose down -v                                              # stop and delete every volume
 #
+# Ports bind to 127.0.0.1; set DATALEDGER_BIND=0.0.0.0 to reach them from other machines.
 # The private keys below are anvil's public development accounts; they only hold value on this local chain.
 
 name: dataledger
 
+x-hardened: &hardened
+  init: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
 x-contracts: &contracts
-  image: sadrulemail/dataledger-contracts:${DATALEDGER_TAG:-1.0.0}
+  <<: *hardened
+  image: sadrulemail/dataledger-contracts:${DATALEDGER_TAG:-1.1.0}
   build:
     context: .
     target: contracts
 
 x-service: &service
-  image: sadrulemail/dataledger:${DATALEDGER_TAG:-1.0.0}
+  <<: *hardened
+  image: sadrulemail/dataledger:${DATALEDGER_TAG:-1.1.0}
   build:
     context: .
     target: service
+  read_only: true
+  tmpfs: ["/tmp"]
+
+x-service-env: &service-env
+  DATALEDGER_RPC_URL: http://chain:8545
+  DATALEDGER_DATABASE_URL: postgresql+psycopg://dataledger:${DATALEDGER_DB_PASSWORD:-dataledger}@postgres:5432/dataledger
+  DATALEDGER_AUTO_MIGRATE: "false" # the migrate job owns the schema
+  DATALEDGER_LOG_FORMAT: json
 
 services:
   chain:
     <<: *contracts
     command: ["chain"]
-    ports: ["8545:8545"]
+    ports: ["${DATALEDGER_BIND:-127.0.0.1}:8545:8545"]
     volumes: ["chain:/data"]
     healthcheck:
       test: ["CMD", "cast", "block-number", "--rpc-url", "http://127.0.0.1:8545"]
@@ -43,31 +63,83 @@ services:
       GATEWAY_ADDRESS: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
       AUDITOR_ADDRESS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC"
       PUBLISHER_ADDRESSES: "0x90F79bf6EB2c4f870365E785982E1f101E93b906,0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"
+      ADMIN_TRANSFER_DELAY: "172800"
     volumes: ["deployments:/app/deployments"]
     depends_on:
       chain:
         condition: service_healthy
 
+  postgres:
+    <<: *hardened
+    image: postgres:18-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015
+    cap_add: ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"] # the entry point drops to the postgres user
+    environment:
+      POSTGRES_USER: dataledger
+      POSTGRES_PASSWORD: ${DATALEDGER_DB_PASSWORD:-dataledger}
+      POSTGRES_DB: dataledger
+    volumes: ["postgres:/var/lib/postgresql"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dataledger -d dataledger"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  migrate:
+    <<: *service
+    command: ["db", "upgrade"]
+    environment: *service-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     <<: *service
+    command: ["serve", "--host", "0.0.0.0", "--port", "8000", "--no-indexer"]
     environment:
-      DATALEDGER_RPC_URL: http://chain:8545
+      <<: *service-env
+      DATALEDGER_RUN_INDEXER: "false"
       # Empty: the entry point keeps a generated key ring in the data volume. Set it to use your own keys.
       DATALEDGER_MASTER_KEYS: ${DATALEDGER_MASTER_KEYS:-}
       DATALEDGER_GATEWAY_PRIVATE_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
-    ports: ["8000:8000"]
+    ports: ["${DATALEDGER_BIND:-127.0.0.1}:8000:8000"]
     volumes:
       - data:/data
       - deployments:/deployments:ro
     depends_on:
       deploy:
         condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
       interval: 3s
       timeout: 3s
       retries: 20
       start_period: 5s
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 1g }
+    restart: unless-stopped
+
+  indexer:
+    <<: *service
+    command: ["index", "--metrics-port", "9100"]
+    environment: *service-env
+    volumes: ["deployments:/deployments:ro"]
+    depends_on:
+      deploy:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    deploy:
+      resources:
+        limits: { cpus: "1", memory: 512m }
     restart: unless-stopped
 
   reference-data:
@@ -77,12 +149,48 @@ services:
     environment:
       DATALEDGER_RPC_URL: http://chain:8545
       DATALEDGER_API_URL: http://api:8000
+      DATALEDGER_AUTO_MIGRATE: "false"
     volumes: ["deployments:/deployments:ro"]
     depends_on:
       api:
         condition: service_healthy
+      indexer:
+        condition: service_healthy
+
+  prometheus:
+    <<: *hardened
+    profiles: ["observability"]
+    image: prom/prometheus:v3.16.0@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d"]
+    volumes:
+      - ./docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus:/prometheus
+    ports: ["${DATALEDGER_BIND:-127.0.0.1}:9090:9090"]
+    restart: unless-stopped
+
+  grafana:
+    <<: *hardened
+    profiles: ["observability"]
+    image: grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-dataledger}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/dataledger.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./docker/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    ports: ["${DATALEDGER_BIND:-127.0.0.1}:3000:3000"]
+    depends_on: [prometheus]
+    restart: unless-stopped
 
 volumes:
   chain:
   deployments:
   data:
+  postgres:
+  prometheus:
+  grafana:

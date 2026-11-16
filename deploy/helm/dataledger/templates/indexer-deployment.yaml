@@ -1,0 +1,102 @@
+{{- if .Values.indexer.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dataledger.fullname" . }}-indexer
+  labels:
+    {{- include "dataledger.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  # One writer applies chain events to the read models; Recreate never runs two at once.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "dataledger.selector" (dict "root" . "component" "indexer") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dataledger.labels" . | nindent 8 }}
+        app.kubernetes.io/component: indexer
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "dataledger.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "dataledger.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        - name: migrate
+          image: {{ include "dataledger.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["db", "upgrade"]
+          env:
+            {{- include "dataledger.commonEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "dataledger.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: deployment, mountPath: /etc/dataledger, readOnly: true }
+          resources:
+            {{- toYaml .Values.indexer.resources | nindent 12 }}
+      containers:
+        - name: indexer
+          image: {{ include "dataledger.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["index", "--metrics-port", "{{ .Values.indexer.metricsPort }}"]
+          ports:
+            - { name: metrics, containerPort: {{ .Values.indexer.metricsPort }}, protocol: TCP }
+          env:
+            {{- include "dataledger.commonEnv" . | nindent 12 }}
+            - name: DATALEDGER_INDEXER_POLL_SECONDS
+              value: {{ .Values.indexer.pollSeconds | quote }}
+            - name: DATALEDGER_INDEXER_BATCH_BLOCKS
+              value: {{ .Values.indexer.batchBlocks | quote }}
+            {{- with .Values.indexer.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet: { path: /metrics, port: metrics }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+          securityContext:
+            {{- include "dataledger.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: deployment, mountPath: /etc/dataledger, readOnly: true }
+          resources:
+            {{- toYaml .Values.indexer.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: deployment
+          configMap:
+            name: {{ include "dataledger.fullname" . }}-deployment
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

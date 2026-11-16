@@ -1,0 +1,173 @@
+{{- $local := eq .Values.objectStore.type "local" }}
+{{- if and $local (or (gt (int .Values.api.replicas) 1) .Values.api.autoscaling.enabled) }}
+{{- fail "objectStore.type=local keeps objects on a ReadWriteOnce volume: set api.replicas=1 and disable autoscaling, or use objectStore.type=s3" }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dataledger.fullname" . }}-api
+  labels:
+    {{- include "dataledger.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicas }}
+  {{- end }}
+  revisionHistoryLimit: 5
+  {{- if $local }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "dataledger.selector" (dict "root" . "component" "api") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dataledger.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if not .Values.secrets.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "dataledger.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "dataledger.podSecurityContext" . | nindent 8 }}
+      initContainers:
+        # Every pod migrates before it serves; a PostgreSQL advisory lock lets only one run at a time.
+        - name: migrate
+          image: {{ include "dataledger.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["db", "upgrade"]
+          env:
+            {{- include "dataledger.commonEnv" . | nindent 12 }}
+          securityContext:
+            {{- include "dataledger.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: deployment, mountPath: /etc/dataledger, readOnly: true }
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+      containers:
+        - name: api
+          image: {{ include "dataledger.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve", "--host", "0.0.0.0", "--port", "{{ .Values.api.port }}", "--no-indexer"]
+          ports:
+            - { name: http, containerPort: {{ .Values.api.port }}, protocol: TCP }
+          env:
+            {{- include "dataledger.commonEnv" . | nindent 12 }}
+            - name: DATALEDGER_RUN_INDEXER
+              value: "false"
+            - name: DATALEDGER_MASTER_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dataledger.secretName" . }}
+                  key: {{ .Values.secrets.keys.masterKeys }}
+            - name: DATALEDGER_GATEWAY_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dataledger.secretName" . }}
+                  key: {{ .Values.secrets.keys.gatewayPrivateKey }}
+                  optional: true
+            - name: DATALEDGER_OBJECT_STORE
+              value: {{ .Values.objectStore.type | quote }}
+            {{- if $local }}
+            - name: DATALEDGER_OBJECT_STORE_DIR
+              value: /data/objects
+            {{- else }}
+            - name: DATALEDGER_S3_BUCKET
+              value: {{ required "objectStore.s3.bucket is required for objectStore.type=s3" .Values.objectStore.s3.bucket | quote }}
+            - name: DATALEDGER_S3_PREFIX
+              value: {{ .Values.objectStore.s3.prefix | quote }}
+            {{- with .Values.objectStore.s3.region }}
+            - name: DATALEDGER_S3_REGION
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.objectStore.s3.endpointUrl }}
+            - name: DATALEDGER_S3_ENDPOINT_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            - name: DATALEDGER_CORS_ORIGINS
+              value: {{ join "," .Values.api.corsOrigins | quote }}
+            - name: DATALEDGER_RELAY_ENABLED
+              value: {{ .Values.api.relay.enabled | quote }}
+            - name: DATALEDGER_RELAY_MAX_PER_HOUR
+              value: {{ .Values.api.relay.maxPerHour | quote }}
+            - name: DATALEDGER_MAX_UPLOAD_MB
+              value: {{ .Values.api.maxUploadMb | quote }}
+            - name: DATALEDGER_HSTS
+              value: {{ and .Values.ingress.enabled .Values.ingress.hsts | quote }}
+            {{- with .Values.api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          securityContext:
+            {{- include "dataledger.containerSecurityContext" . | nindent 12 }}
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: deployment, mountPath: /etc/dataledger, readOnly: true }
+            {{- if $local }}
+            - { name: data, mountPath: /data }
+            {{- end }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ printf "%dMi" (add (mul (int .Values.api.maxUploadMb) 2) 64) }}
+        - name: deployment
+          configMap:
+            name: {{ include "dataledger.fullname" . }}-deployment
+        {{- if $local }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "dataledger.fullname" . }}-objects
+        {{- end }}
+      {{- if not .Values.affinity }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "dataledger.selector" (dict "root" . "component" "api") | nindent 14 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

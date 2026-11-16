@@ -13,10 +13,11 @@ if [ -z "${DATALEDGER_MASTER_KEYS:-}" ] && [ -n "${DATALEDGER_MASTER_KEYS_FILE:-
   export DATALEDGER_MASTER_KEYS
 fi
 
-# The server needs a key ring. Without one, keep a generated ring in the data volume so a local stack works out
-# of the box; anywhere else, inject the keys from a secret store so they never sit next to the ciphertext.
+# The gateway needs a key ring (the indexer and migrations do not). Without one, keep a generated ring in the data
+# volume so a local stack works out of the box; anywhere else, inject the keys from a secret store so they never
+# sit next to the ciphertext.
 case "${1:-} ${2:-}" in
-  "dataledger serve" | "dataledger index" | "dataledger rotate-keys")
+  "dataledger serve" | "dataledger rotate-keys")
     if [ -z "${DATALEDGER_MASTER_KEYS:-}" ]; then
       ring=/data/master-keys
       if [ ! -s "$ring" ]; then

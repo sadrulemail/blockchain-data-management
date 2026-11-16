@@ -28,3 +28,8 @@ contracts/lib/openzeppelin-contracts/certora
 contracts/lib/openzeppelin-contracts/fv
 contracts/lib/openzeppelin-contracts/scripts
 contracts/lib/openzeppelin-contracts/hardhat
+**/.mypy_cache
+deploy
+docker/observability
+contracts/.gas-snapshot
+contracts/slither.config.json

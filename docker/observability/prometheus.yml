@@ -1,0 +1,16 @@
+# Scrapes the gateway API and the standalone indexer of the compose stack.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: dataledger-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels: { component: api }
+
+  - job_name: dataledger-indexer
+    static_configs:
+      - targets: ["indexer:9100"]
+        labels: { component: indexer }
