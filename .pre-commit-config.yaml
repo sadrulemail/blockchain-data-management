@@ -1,0 +1,43 @@
+# pre-commit install   then every commit runs these checks on the staged files.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: \.(png|svg)$
+      - id: end-of-file-fixer
+        exclude: \.(png|svg)$
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+        exclude: ^deploy/helm/dataledger/templates/
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: detect-private-key
+        exclude: ^(service/tests/|scripts/load_reference_data.py|docker-compose.yml|service/.env.example)
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^(service|scripts)/
+      - id: ruff-format
+        files: ^(service|scripts)/
+
+  - repo: local
+    hooks:
+      - id: forge-fmt
+        name: forge fmt
+        entry: bash -c 'cd contracts && forge fmt --check'
+        language: system
+        files: ^contracts/(src|test|script)/.*\.sol$
+        pass_filenames: false
+      - id: mypy
+        name: mypy
+        entry: bash -c 'cd service && uv run mypy'
+        language: system
+        files: ^service/src/.*\.py$
+        pass_filenames: false

@@ -9,13 +9,15 @@ between datasets, purpose-bound access grants, a log of every read, and independ
 
 | | |
 |---|---|
-| **Smart contracts** | Solidity 0.8.28, OpenZeppelin 5.4, Foundry: 3 contracts, 70 tests (unit, fuzz, invariant, cross-language golden vector), 100% line and branch coverage |
-| **Data service** | Python 3.12, FastAPI, web3.py 7, SQLAlchemy 2: ingestion, envelope encryption, wallet-signed API, access gateway, public verification |
-| **Indexer** | Event-sourced read models in SQL, rebuilt from chain logs, re-org aware |
+| **Smart contracts** | Solidity 0.8.38 (Prague EVM), OpenZeppelin 5.7, Foundry 1.9: 3 contracts, 85 tests (unit, fuzz, invariant, cross-language golden vector), 100% line and branch coverage, no Slither findings |
+| **Data service** | Python 3.14, FastAPI, web3.py 8, SQLAlchemy 2.1 with Alembic migrations: ingestion, envelope encryption, access gateway, public verification |
+| **Wallets** | EIP-712 typed-data signatures for API calls and access requests, ERC-1271 smart accounts (Safe, passkey wallets, EIP-7702 delegates), gasless access requests relayed by the gateway |
+| **Indexer** | Event-sourced read models in PostgreSQL 18 (SQLite on a laptop), rebuilt from chain logs, re-org aware, runs as its own process |
+| **Storage** | AES-256-GCM with a key per object, on any S3-compatible bucket or a volume; crypto-shredding for erasure |
 | **Console** | Dependency-free web console: catalogue, versions, lineage graph, access, audit trail, verification |
-| **Cryptography** | Keccak-256 Merkle trees (OpenZeppelin compatible), SHA-256 file fingerprints, AES-256-GCM with per-object keys, EIP-191 request signatures |
-| **Quality gates** | 147 automated tests across both languages, end-to-end runs against a real local chain |
-| **Docker** | Images on Docker Hub: [`sadrulemail/dataledger`](https://hub.docker.com/r/sadrulemail/dataledger) and [`sadrulemail/dataledger-contracts`](https://hub.docker.com/r/sadrulemail/dataledger-contracts); one `docker compose up` runs the chain, the deployment, the API and the console |
+| **Operations** | Prometheus metrics and a Grafana dashboard, JSON logs with request ids, OpenTelemetry traces, liveness and readiness probes |
+| **Delivery** | Docker images for linux/amd64 and linux/arm64 with SBOM and provenance, a hardened Docker Compose stack, a Helm chart for Kubernetes |
+| **Quality gates** | 195 automated tests across both languages, end-to-end runs against a real chain on SQLite and PostgreSQL, one `make check` |
 
 ---
 
@@ -30,11 +32,13 @@ between datasets, purpose-bound access grants, a log of every read, and independ
 7. [Reference scenario](#reference-scenario)
 8. [Screens](#screens)
 9. [Run with Docker](#run-with-docker)
-10. [Run it locally](#run-it-locally)
-11. [Quality gates](#quality-gates)
-12. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
-13. [Taking it to production](#taking-it-to-production)
-14. [Project structure](#project-structure)
+10. [Deploy to Kubernetes](#deploy-to-kubernetes)
+11. [Operations](#operations)
+12. [Run it locally](#run-it-locally)
+13. [Quality gates](#quality-gates)
+14. [Design decisions and trade-offs](#design-decisions-and-trade-offs)
+15. [Taking it to production](#taking-it-to-production)
+16. [Project structure](#project-structure)
 
 ---
 
@@ -146,7 +150,9 @@ Every dataset has a classification: `Public`, `Internal`, `Confidential` or `Res
 readable by anyone who signs a request. For everything else:
 
 1. A consumer calls `requestAccess` with a stated purpose. The purpose text is emitted in the event and its
-   keccak hash is stored, so the approval is bound to that purpose.
+   keccak hash is stored, so the approval is bound to that purpose. A consumer without gas signs the same request
+   as EIP-712 typed data instead, and the gateway submits it with `requestAccessWithSig`; the contract checks the
+   signature itself (ECDSA for wallets, ERC-1271 for smart accounts), so the gateway cannot forge a request.
 2. The owner or a steward approves with a duration (at most 365 days) or rejects with a reason.
 3. Grants can be revoked by the owner or renounced by the grantee at any time.
 
@@ -200,7 +206,9 @@ configurable confirmation depth trades freshness for stability on public network
 | A record is moved to another row | Leaves encode the row position |
 | A leaf is forged from internal nodes | Double-hashed leaves |
 | A data owner rubber-stamps their own quality | `ConflictOfInterest` in `QualityLedger` |
-| A signed API request is replayed | Signature covers method, path, time and a one-time nonce; nonces are remembered for the validity window |
+| A signed API request is replayed or altered | The EIP-712 signature covers method, path, body digest, time and a one-time nonce, in a domain bound to the chain and the deployment; nonces are remembered for the validity window |
+| A relayed access request is forged or replayed | The requester's signature is checked in the contract, with a per-account nonce and a deadline |
+| An admin key is mistyped, lost or stolen | The admin role has one holder and moves in two steps, after a delay (2 days by default) |
 | Personal data must be erased | Nothing personal is on-chain; crypto-shredding destroys the only key |
 
 ---
@@ -209,12 +217,14 @@ configurable confirmation depth trades freshness for stability on public network
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/architecture-dark.png">
-  <img src="docs/diagrams/architecture.png" width="1250" alt="Architecture: publishers, consumers, auditors and verifiers use signed transactions to the contracts and signed requests to the Python data service">
+  <img src="docs/diagrams/architecture.png" width="1385" alt="Architecture: publishers, consumers, auditors and verifiers use signed transactions to the contracts and signed requests to the Python data service, which keeps read models in PostgreSQL, objects in S3 and exposes metrics to Prometheus">
 </picture>
 
 Writes that change governance state (registering, committing, granting, attesting) are signed by the actor's own
 wallet and go straight to the chain. The service never holds those keys. It holds one key of its own, the
-gateway key, whose only power is to log reads.
+gateway key, whose only powers are to log reads and to submit access requests that consumers signed themselves.
+The API and the indexer are separate processes that share the PostgreSQL read models, so the API scales
+horizontally while exactly one indexer applies chain events.
 
 ---
 
@@ -245,8 +255,11 @@ gateway key, whose only power is to log reads.
 
 ## Smart contracts
 
-All three contracts use OpenZeppelin `AccessControl`, custom errors and events for every state change.
-`DataRegistry` is also `Pausable` for emergencies.
+All three contracts use OpenZeppelin `AccessControlDefaultAdminRules`: the admin role has a single holder and
+changes hands in two steps after a delay, so a mistyped address or a stolen key cannot take over at once. They use
+custom errors and emit an event for every state change. `DataRegistry` is also `Pausable` for emergencies, and
+`DataRegistry` and `AccessLedger` support `multicall` to batch several calls in one transaction. The contracts are
+deliberately not upgradeable; see [design decisions](#design-decisions-and-trade-offs).
 
 ### DataRegistry
 
@@ -271,12 +284,15 @@ Events: `DatasetRegistered`, `VersionCommitted`, `LineageLinked`, `SchemaChanged
 | Function | Who | Purpose |
 |---|---|---|
 | `requestAccess(id, purpose)` | anyone | Opens one pending request per dataset and requester |
+| `requestAccessWithSig(id, requester, purpose, deadline, signature)` | anyone (a relayer) | Opens a request the requester signed off-chain (EIP-712; ERC-1271 for smart accounts) |
+| `hashAccessRequest(...)`, `nonces(account)`, `eip712Domain()` | anyone (view) | The digest to sign, the next nonce and the signing domain (ERC-5267) |
 | `approveRequest(requestId, duration)` / `rejectRequest(requestId, reason)` | owner, steward | Decide a request |
 | `cancelRequest(requestId)` | requester | Withdraw a pending request |
 | `grantAccess(id, grantee, duration, purpose)` / `revokeAccess(id, grantee)` | owner, steward | Direct grants |
 | `renounceAccess(id)` | grantee | Give up a grant early |
 | `logAccess(id, version, accessor, receiptHash)` | `GATEWAY_ROLE` | Rechecks access, refuses withdrawn versions, emits `DataAccessed` |
 | `hasAccess(id, account)` | anyone (view) | Public, owner, steward, or a live unrevoked grant |
+| `multicall(calls)` | anyone | Batches calls, such as grants to several teams, in one transaction |
 
 ### QualityLedger
 
@@ -287,13 +303,15 @@ Events: `DatasetRegistered`, `VersionCommitted`, `LineageLinked`, `SchemaChanged
 
 ### Gas profile
 
-Measured with `forge test --gas-report` (median, cancun EVM). Verification calls are `view` and cost nothing when
-called off-chain.
+Measured with `forge test --gas-report` (Prague EVM). Verification calls are `view` and cost nothing when called
+off-chain. `contracts/.gas-snapshot` records the gas of every unit test, and `make gas-check` fails when a change
+moves it.
 
 | Operation | Gas |
 |---|---|
-| `registerDataset` | ~129k |
-| `commitVersion` (no parents / with lineage links) | ~220k / up to ~340k |
+| `registerDataset` | ~166k |
+| `commitVersion` (no parents / with lineage links) | ~220k / up to ~342k |
+| `requestAccess` / `requestAccessWithSig` (paid by the relayer) | ~145k / ~186k |
 | `grantAccess` | ~103k |
 | `logAccess` (one read) | ~31k–68k |
 | `attest` | ~155k (first attestation) |
@@ -312,25 +330,32 @@ The Python package `dataledger` (in `service/`) contains:
 | `canonical.py` | Schemas, typed normalisation, canonical JSON records, record leaves |
 | `merkle.py` | Merkle tree, proofs and leaf-level diffs, compatible with OpenZeppelin `MerkleProof` |
 | `crypto.py` | Key ring, AES-256-GCM envelope encryption, key rotation |
-| `storage.py` | Content-addressed object store (local filesystem; same interface fits S3, Azure Blob or IPFS) |
+| `storage.py` | Content-addressed object store: S3-compatible buckets or a local volume (the same four methods fit Azure Blob or IPFS) |
 | `chain.py` | Typed contract client, transaction sending, custom-error decoding |
 | `indexer.py` | Event indexer with cursor, batch commits and re-org recovery |
 | `platform.py` | Gateway operations: ingest, gated reads, proofs, diffs, verification, crypto-shredding |
 | `quality.py` | Data-quality checks and reports without cell values |
-| `auth.py` | EIP-191 signed requests with freshness window and nonce replay protection |
-| `api.py` | FastAPI app (OpenAPI docs at `/docs`) and the web console |
+| `auth.py` | EIP-712 signed requests: body digest, freshness window, nonce replay protection, ERC-1271 for smart accounts |
+| `db.py`, `migrations/` | Table definitions and Alembic revisions; `dataledger db upgrade` |
+| `observability.py` | JSON logs with request ids, Prometheus metrics, security headers, OpenTelemetry |
+| `api.py` | FastAPI app (OpenAPI docs at `/docs`), probes, metrics, the gasless relay and the web console |
 | `cli.py` | `dataledger` command line for every role |
 
 ### Endpoints
 
 | Method and path | Auth | Description |
 |---|---|---|
+| `GET /healthz`, `GET /readyz` | public | Liveness; readiness checks the database, the chain id and the contract code |
+| `GET /metrics` | public | Prometheus metrics |
 | `GET /api/health` | public | Chain id, head and indexed block, gateway address, contract addresses |
+| `GET /api/auth/domain` | public | EIP-712 domain and types for signed requests |
 | `GET /api/overview` | public | Platform statistics and recent activity |
 | `GET /api/datasets`, `GET /api/datasets/{id}` | public | Catalogue and dataset detail (versions, lineage, grants, requests, reads, quality, schema) |
 | `GET /api/lineage?dataset_id=&version=` | public | Lineage graph, optionally focused on a dataset |
 | `GET /api/audit?dataset_id=` | public | Unified audit trail (chain events and gateway actions) |
 | `GET /api/access-requests` | public | All access requests |
+| `POST /api/relay/access-requests/prepare` | public | Typed data a consumer signs to ask for access without gas |
+| `POST /api/relay/access-requests` | signature in the body | The gateway submits the signed request and pays the gas (rate limited per account) |
 | `GET /api/documents/{hash}`, `POST /api/documents` | public / signed | Content-addressed schema and report documents |
 | `POST /api/datasets/{id}/objects` | signed, owner or steward | Stage an encrypted upload, returns values to anchor |
 | `GET /api/datasets/{id}/versions/{v}/download` | signed, access | Verified, logged download |
@@ -340,17 +365,17 @@ The Python package `dataledger` (in `service/`) contains:
 | `POST /api/verify/file` | public | Exact match, records match, mismatch or unknown |
 | `POST /api/verify/record` | public | On-chain record proof check |
 
-**Signed requests.** The caller signs this text with `personal_sign` and sends the address, issue time, nonce and
-signature in `X-DL-*` headers:
+**Signed requests.** The caller signs an EIP-712 `Request` with `eth_signTypedData_v4`, so a wallet shows every
+field before signing. The domain names the chain and the AccessLedger address, so a signature cannot be replayed
+against another network or deployment:
 
 ```text
-DataLedger signed request
-Method: GET
-Path: /api/datasets/2/versions/2/download
-Address: 0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65
-Issued: 2026-11-07T07:00:00Z
-Nonce: 5f0c9a1e7b2d4c6f8a9b0c1d
+Request(address account, string method, string path, bytes32 contentDigest, uint256 issuedAt, bytes32 nonce)
 ```
+
+The request carries `X-DL-Address`, `X-DL-Issued`, `X-DL-Nonce`, `X-DL-Signature` and an RFC 9530
+`Content-Digest` of the body. The gateway hashes the body as it arrives and refuses a digest that does not match,
+so an upload cannot be swapped in transit. Smart-account signatures are checked with ERC-1271 `isValidSignature`.
 
 The signature proves who is asking. Whether they may read is always decided by the contracts.
 
@@ -376,8 +401,9 @@ deterministically by `scripts/generate_datasets.py`.
    category) and commits it with three parents: orders v2, customers v1, catalog v1.
 6. **Independent quality audit.** The auditor gets review grants, reads each version and attests:
    orders v1 **fails at 84.8%**, every other version passes at 100%.
-7. **Partner sharing.** The partner analyst is granted the aggregate for go-to-market planning and reads it;
-   a request for customer contacts is rejected with a reason on-chain.
+7. **Partner sharing.** The partner analyst signs two access requests off-chain and the gateway relays them,
+   so the partner pays no gas. The aggregate is shared for go-to-market planning and read; the request for
+   customer contacts is rejected with a reason on-chain.
 8. **Right to erasure.** Customer 5017 asks to be forgotten: customers v2 is published without them, v1 is
    withdrawn with the reason on-chain and then crypto-shredded. The lineage graph still shows that revenue v1 was
    built from the withdrawn version.
@@ -407,24 +433,40 @@ checked against the contract.
 
 ## Run with Docker
 
-The platform is published as two images on Docker Hub (linux/amd64, tags `1.0.0` and `latest`):
+The platform is published as two images on Docker Hub, for linux/amd64 and linux/arm64, with an SBOM and build
+provenance attached (tags `1.1.0` and `latest`):
 
 | Image | Contents |
 |---|---|
-| [`sadrulemail/dataledger`](https://hub.docker.com/r/sadrulemail/dataledger) | Data service: API gateway, event indexer, web console and CLI, plus the reference datasets |
+| [`sadrulemail/dataledger`](https://hub.docker.com/r/sadrulemail/dataledger) | Data service: API gateway, event indexer, migrations, web console and CLI, plus the reference datasets |
 | [`sadrulemail/dataledger-contracts`](https://hub.docker.com/r/sadrulemail/dataledger-contracts) | The three ledgers compiled with Foundry: runs a local chain (`chain`) or deploys to any RPC endpoint (`deploy`) |
 
-[`docker-compose.yml`](docker-compose.yml) is all you need. It starts a local chain, deploys the ledgers, then
-starts the service once the deployment has finished:
+[`docker-compose.yml`](docker-compose.yml) is all you need. It starts a local chain and PostgreSQL, deploys the
+ledgers and migrates the schema once, then starts the API and the indexer:
 
 ```bash
-docker compose up -d
+docker compose up -d --wait
 ```
+
+| Service | Role |
+|---|---|
+| `chain` | anvil on `127.0.0.1:8545`, state kept in a volume |
+| `deploy` | one-shot: deploys the ledgers and grants the roles, skipped when they already exist |
+| `postgres` | PostgreSQL 18 for the read models |
+| `migrate` | one-shot: `dataledger db upgrade` |
+| `api` | gateway API and console on `127.0.0.1:8000` |
+| `indexer` | applies chain events to the read models; metrics on port 9100 |
 
 Play the reference scenario (optional), then open the console at <http://localhost:8000>:
 
 ```bash
 docker compose --profile reference-data run --rm reference-data
+```
+
+Add Prometheus on <http://localhost:9090> and Grafana on <http://localhost:3000> (see [Operations](#operations)):
+
+```bash
+docker compose --profile observability up -d
 ```
 
 The CLI runs inside the service container:
@@ -439,17 +481,70 @@ Stop the stack and delete every volume:
 docker compose down -v
 ```
 
-- **State survives restarts.** The chain keeps its state in the `chain` volume and the deploy step is skipped
-  when the ledgers already exist, so `docker compose down` followed by `up` brings back the same chain, data and
-  read models.
+- **Hardened by default.** Ports bind to 127.0.0.1 (set `DATALEDGER_BIND=0.0.0.0` to open them), service
+  containers run read-only as a non-root user with every Linux capability dropped and `no-new-privileges`, and
+  each service has a health check and a memory limit.
+- **State survives restarts.** The chain, database and objects live in volumes and the deploy step is skipped when
+  the ledgers exist, so `docker compose down` followed by `up` brings back the same chain and data.
+- **Upgrading from 1.0.0.** 1.1.0 deploys new contracts and moves the read models to PostgreSQL. Reset a 1.0.0
+  stack with `docker compose down -v` before `docker compose up -d`.
 - **Keys.** Without `DATALEDGER_MASTER_KEYS`, the service generates a key ring and keeps it in its data volume.
   That is convenient on a laptop, but anyone holding the volume then holds both the ciphertext and the key.
   Anywhere else, inject the keys from a secret store, either as `DATALEDGER_MASTER_KEYS` or as a mounted file
   named in `DATALEDGER_MASTER_KEYS_FILE`.
 - **Other chains.** Run the contracts image with `deploy`, set `RPC_URL` and `DEPLOYER_PRIVATE_KEY`, and mount
-  `/app/deployments` to collect `<chainId>.json`. Point the service's `DATALEDGER_DEPLOYMENT_FILE` at that file.
-- **Building from source.** `docker compose build`, or the `docker build --target` commands at the top of the
-  [`Dockerfile`](Dockerfile).
+  `/app/deployments` to collect `<chainId>.json`. Set `FINAL_ADMIN_ADDRESS` to hand the admin role to a multisig
+  or timelock. Point the service's `DATALEDGER_DEPLOYMENT_FILE` at the JSON file.
+- **Building from source.** `docker compose build`, or `make images` ([`docker-bake.hcl`](docker-bake.hcl) builds
+  both images for both platforms with SBOM and provenance attestations).
+
+---
+
+## Deploy to Kubernetes
+
+[`deploy/helm/dataledger`](deploy/helm/dataledger) is a Helm chart for the off-chain half. It expects a chain with
+the ledgers deployed, PostgreSQL, and an S3-compatible bucket (or a volume for a single replica):
+
+```bash
+helm install dataledger deploy/helm/dataledger -n dataledger --create-namespace \
+  --set chain.rpcUrl=https://sepolia.base.org \
+  --set-json 'chain.deployment={"chainId":84532,"startBlock":0,"dataRegistry":"0x...","accessLedger":"0x...","qualityLedger":"0x..."}' \
+  --set secrets.existingSecret=dataledger-runtime \
+  --set objectStore.s3.bucket=dataledger-objects --set objectStore.s3.region=eu-west-1
+```
+
+| Resource | Details |
+|---|---|
+| API `Deployment` | Two replicas by default, spread across nodes, `startupProbe`/`livenessProbe` on `/healthz` and `readinessProbe` on `/readyz`; optional HPA and a PodDisruptionBudget |
+| Indexer `Deployment` | One replica with the `Recreate` strategy, so two indexers never write at once |
+| Migrations | An init container runs `dataledger db upgrade` in every pod; a PostgreSQL advisory lock lets one run at a time |
+| Configuration | The deployment addresses in a ConfigMap; the database URL, key ring and gateway key from a Secret (`secrets.existingSecret` fits External Secrets or Sealed Secrets) |
+| Security | Non-root uid 10001, read-only root filesystem, all capabilities dropped, `RuntimeDefault` seccomp, no service-account token |
+| Optional | Ingress with TLS and HSTS, `ServiceMonitor` for the Prometheus Operator, `NetworkPolicy` |
+
+`values.schema.json` rejects malformed values (such as a bad contract address), and the chart refuses settings
+that cannot work, such as several replicas on a single-node volume. `make helm-lint` lints the chart with two
+value profiles in [`ci/`](deploy/helm/dataledger/ci).
+
+---
+
+## Operations
+
+![Grafana dashboard](docs/screenshots/grafana.png)
+
+- **Metrics.** The API serves Prometheus metrics at `/metrics` and the indexer on its own port
+  (`dataledger index --metrics-port 9100`): requests and latency by route template, chain head, indexed block
+  and lag, and gateway events (staged uploads, reads logged on-chain, record proofs, relayed requests,
+  crypto-shreds, rejected signatures, integrity failures). The compose `observability` profile provisions
+  Prometheus and the Grafana dashboard above.
+- **Logs.** One JSON object per line (`DATALEDGER_LOG_FORMAT=json`, the image default) with the request id of the
+  call that caused it. Callers can send `X-Request-ID`; every response returns it.
+- **Traces.** With the `otel` extra installed (it is in the image), setting `OTEL_EXPORTER_OTLP_ENDPOINT` sends
+  OpenTelemetry traces of every request to any OTLP collector.
+- **Probes.** `/healthz` answers while the process runs; `/readyz` returns 503 until the database answers and the
+  RPC endpoint serves the expected chain with the registry deployed.
+- **Headers.** Every response carries `nosniff`, `no-referrer` and frame protection; the console adds a strict
+  Content-Security-Policy, API responses are `no-store`, and `DATALEDGER_HSTS=true` adds HSTS behind TLS.
 
 ---
 
@@ -458,7 +553,9 @@ docker compose down -v
 ### Prerequisites
 
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) (`forge`, `anvil`)
-- Python 3.12 and [uv](https://docs.astral.sh/uv/)
+- [uv](https://docs.astral.sh/uv/), which fetches Python 3.14 (3.12 and 3.13 work too)
+- Docker, for the PostgreSQL test run and the chart checks
+- `make` (optional): `make help` lists every task, and `make check` runs every quality gate
 
 ### 1. Contracts
 
@@ -494,7 +591,7 @@ This writes `contracts/deployments/31337.json`, which the service reads.
 ### 3. Service
 
 ```bash
-cd ../service && uv sync && cp .env.example .env
+cd ../service && uv sync --all-extras && cp .env.example .env
 ```
 
 Generate a key-encryption key and put the printed line into `.env`:
@@ -539,40 +636,46 @@ uv run dataledger verify-file --file ../datasets/sales_orders_2026-10.csv
 | `publish --dataset 2 --file f.csv [--parent 1:1]` | owner, steward | Uploads, then anchors the version with lineage |
 | `status 2 1 --to deprecated --reason "..."` | owner, steward | Lifecycle change |
 | `steward 2 0xabc...` / `grant 2 0xabc... "purpose" --days 30` / `revoke` | owner | Stewardship and grants |
-| `request-access 2 "purpose"` / `approve 1 --days 90` / `reject 1 "reason"` | consumer / owner | Request flow |
+| `request-access 2 "purpose" [--gasless]` / `approve 1 --days 90` / `reject 1 "reason"` | consumer / owner | Request flow; `--gasless` signs EIP-712 and lets the gateway pay |
 | `download 2 2 --out f.csv` / `prove 2 2 41` | consumer | Logged download, record proof |
 | `verify-file --file f.csv [--dataset 2 --version 2]` / `verify-record proof.json` | anyone | Public verification |
 | `quality 2 2` | auditor | Reads, checks, publishes the report and attests on-chain |
 | `shred 1 1 --reason "erasure request"` | owner | Withdraws on-chain and destroys the data key |
-| `serve`, `index [--once]`, `keygen`, `rotate-keys` | operator | Run and maintain the service |
+| `serve [--no-indexer]`, `index [--once] [--metrics-port 9100]`, `db upgrade`, `db current`, `keygen`, `rotate-keys` | operator | Run and maintain the service |
 
 ---
 
 ## Quality gates
 
-| Suite | Count | What it covers |
+`make check` runs every gate below; [pre-commit](.pre-commit-config.yaml) runs the fast ones on each commit.
+
+| Gate | Count | What it covers |
 |---|---|---|
-| Contract unit tests | 62 | Every function, role check, custom error and event, status transitions, ownership hand-over, pause, deploy script |
-| Contract fuzz tests | 4 × 1,000 runs | Proofs accepted for every record, rejected when tampered or moved; grant expiry boundaries |
+| Contract unit tests | 76 | Every function, role check, custom error and event, status transitions, ownership and admin hand-over, pause, signed requests (EOA and ERC-1271), batching, deploy script |
+| Contract fuzz tests | 5 × 1,000 runs | Proofs accepted for every record, rejected when tampered or moved; grant expiry; only the real signer can open a signed request |
 | Contract invariants | 3 × 128 runs × 64 calls | Counters match commits, lineage graph always closed, withdrawn is final |
-| Golden vector | 1 | Same records give the same Merkle root in Solidity and in the Python unit suite |
-| Python unit tests | 58 | Canonicalisation, Merkle trees, encryption and tamper detection, storage, quality checks, request signing |
-| End-to-end tests | 19 | Real anvil chain per run: publish, gated reads, on-chain proof checks, file verification, diffs, storage tampering, lineage, attestations, conflict of interest, withdrawal and crypto-shredding, key rotation, indexer rebuild and re-org recovery |
+| Golden vectors | 2 | Same records give the same Merkle root in Solidity and Python; the Python EIP-712 digest equals `hashAccessRequest` |
+| Static analysis | 0 findings | Slither (every detector, two reviewed suppressions with reasons) and `forge lint` |
+| Gas snapshot | 76 entries | `forge snapshot --check` fails when gas use changes unnoticed |
+| Python unit tests | 80 | Canonicalisation, Merkle trees, encryption, storage (filesystem and S3), EIP-712 signing and replay, migrations, logging, metrics and security headers |
+| End-to-end tests | 30 | Real anvil chain per test: publish, gated reads, proofs, verification, diffs, tampering, lineage, attestations, erasure, key rotation, re-org recovery, gasless relay, smart-account signatures, batched grants, probes, metrics and every CLI command |
+| End-to-end on PostgreSQL | 30 | The same suite against PostgreSQL 18 (`make test-postgres`) |
+| Types and style | | mypy, ruff (lint and format), `forge fmt` |
+| Helm chart | 2 profiles | `helm lint --strict` and kubeconform against the Kubernetes 1.34 schemas |
 
-Contract coverage is 100% of lines, statements, branches and functions (`forge coverage`). Python line coverage
-is 83%.
+Contract coverage is 100% of lines, statements, branches and functions (`forge coverage`). Python coverage is
+89% with branch coverage, and the suite fails below 85%.
 
 ```bash
-cd contracts && forge test && forge coverage --report summary --no-match-coverage "(test|script)"
-```
-
-```bash
-cd service && uv run ruff check . && uv run pytest
+make check
 ```
 
 ---
 
 ## Design decisions and trade-offs
+
+The main decisions are written up as [architecture decision records](docs/adr/README.md), with the options
+considered for each.
 
 **Hashes on-chain, data off-chain.** Storing data on a chain is expensive, public to every node, and impossible
 to delete. Anchoring a 32-byte root gives the same tamper evidence at a fixed cost per version.
@@ -593,8 +696,25 @@ same design can batch receipts into a Merkle root per interval and anchor that i
 **Purpose hashes.** Purposes are bound to grants by hash. Request purposes are emitted in full so reviewers can
 read them, and direct-grant purposes travel in the transaction calldata; nothing personal belongs in a purpose.
 
-**Event-sourced SQL.** The chain is the source of truth, the database is a fast, disposable view. SQLite is the
-default; the SQL layer is SQLAlchemy Core with dialect-aware upserts for PostgreSQL.
+**Event-sourced SQL.** The chain is the source of truth, the database is a fast, disposable view. PostgreSQL
+holds it in every shared deployment and SQLite on a laptop; the SQL layer is SQLAlchemy Core with dialect-aware
+upserts, and the schema evolves through Alembic revisions that a test compares with the table definitions.
+
+**Indexer as its own process.** Applying events is a single-writer job, while the API is stateless and scales
+out. Splitting them lets the API run several replicas and lets the indexer restart without dropping requests.
+
+**EIP-712 rather than plain-text signatures.** Typed data shows the user exactly what they sign, binds the
+signature to one chain and one deployment, and covers the body digest. It is also what smart-account wallets
+verify through ERC-1271, so Safe and passkey wallets can use the API.
+
+**Gasless requests through the gateway.** Asking for access should not need a funded wallet. The consumer signs,
+the gateway pays, and the contract still checks the consumer's signature, so relaying adds no trust in the
+gateway. Each account can have a limited number of requests relayed per hour, and a bad signature fails gas
+estimation before anything is sent.
+
+**Immutable contracts, guarded admin.** The ledgers are not behind upgradeable proxies: an upgrade key could
+rewrite the rules that make the history trustworthy. New rules mean new contracts and a new deployment. What can
+change, the admin role, moves only in two steps with a delay, ideally to a multisig or timelock.
 
 **Any EVM chain.** The contracts use no chain-specific features. The same code runs on a consortium network
 (Hyperledger Besu, Quorum), a public L2, or a public testnet, depending on who must be able to verify.
@@ -603,13 +723,17 @@ default; the SQL layer is SQLAlchemy Core with dialect-aware upserts for Postgre
 
 ## Taking it to production
 
-- Key-encryption keys and the gateway signer in a KMS or HSM instead of environment variables.
-- Object store on S3, Azure Blob or GCS (the `ObjectStore` interface has four methods), PostgreSQL for read models.
-- Confirmations set to the finality of the target chain; indexer as its own process (`dataledger index`).
-- Multisig or a timelock as `DEFAULT_ADMIN_ROLE`, separate `PAUSER_ROLE`.
+Already in place: PostgreSQL with migrations, S3 storage, a separate indexer with confirmations, metrics, probes,
+hardened images and the Helm chart. What remains depends on the environment:
+
+- Key-encryption keys and the gateway signer in a KMS or HSM; the chart reads them from a Secret that an External
+  Secrets operator can fill.
+- `FINAL_ADMIN_ADDRESS` set to a multisig or timelock at deployment, and `PAUSER_ROLE` held separately.
+- `chain.confirmations` matched to the finality of the target chain.
+- A funded, monitored gateway wallet, with rate limits or an allow-list at the ingress for the relay endpoint.
 - Batched read receipts for high-volume datasets.
 - Per-version salts for datasets with low-entropy rows, so record hashes cannot be guessed.
-- Static analysis (Slither) and an external audit before mainnet.
+- An external audit before mainnet; Slither already runs in `make check`.
 
 ---
 
@@ -617,31 +741,40 @@ default; the SQL layer is SQLAlchemy Core with dialect-aware upserts for Postgre
 
 ```text
 blockchain-data-management/
+├── Makefile                      every task and quality gate (`make help`)
 ├── Dockerfile                    service and contracts images (one target each)
-├── docker-compose.yml            chain, deployment, service and reference scenario
-├── docker/                       image entry points
+├── docker-bake.hcl               multi-platform builds with SBOM and provenance
+├── docker-compose.yml            chain, deployment, PostgreSQL, migrations, API, indexer, observability
+├── docker/                       image entry points, Prometheus and Grafana provisioning
+├── deploy/helm/dataledger/       Helm chart for Kubernetes
 ├── contracts/                    Foundry project
 │   ├── src/
 │   │   ├── DataRegistry.sol      datasets, versions, lineage, record proofs
-│   │   ├── AccessLedger.sol      requests, grants, read log
+│   │   ├── AccessLedger.sol      requests (direct and EIP-712 signed), grants, read log
 │   │   ├── QualityLedger.sol     independent attestations
 │   │   └── interfaces/IDataRegistry.sol
-│   ├── script/Deploy.s.sol       deploy, grant roles, write deployments/<chainId>.json
-│   └── test/                     unit, fuzz, invariant and deploy tests
+│   ├── script/Deploy.s.sol       deploy, grant roles, start the admin hand-over, write deployments/<chainId>.json
+│   ├── test/                     unit, fuzz, invariant and deploy tests
+│   ├── .gas-snapshot             gas per unit test
+│   └── slither.config.json
 ├── service/                      Python data service (uv project)
-│   ├── src/dataledger/           API, indexer, crypto, Merkle, CLI, web console, bundled ABIs
+│   ├── src/dataledger/           API, indexer, crypto, Merkle, storage, observability, CLI, console, ABIs
+│   │   └── migrations/           Alembic revisions
 │   └── tests/                    unit tests and end-to-end tests against anvil
 ├── datasets/                     reference CSVs, schema documents, address book
 ├── scripts/
 │   ├── generate_datasets.py      deterministic reference data
 │   ├── load_reference_data.py    full governance cycle against a running platform
 │   ├── export_abi.py             copy ABIs from the Foundry build into the service
-│   ├── capture_screenshots.py    console screenshots for this README
+│   ├── capture_screenshots.py    console and Grafana screenshots for this README
 │   └── render_diagrams.py        README diagrams from docs/diagrams/*.mmd
 └── docs/
+    ├── adr/                      architecture decision records
     ├── diagrams/                 Mermaid sources and rendered light/dark PNGs
     └── screenshots/
 ```
+
+See also [CHANGELOG](CHANGELOG.md), [SECURITY](SECURITY.md) and [CONTRIBUTING](CONTRIBUTING.md).
 
 ## License
 
