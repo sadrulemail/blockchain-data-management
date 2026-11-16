@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {QualityLedger} from "../src/QualityLedger.sol";
 import {IDataRegistry} from "../src/interfaces/IDataRegistry.sol";
 import {BaseTest} from "./Base.t.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {
+    IAccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/IAccessControlDefaultAdminRules.sol";
 
 contract QualityLedgerTest is BaseTest {
     bytes32 internal constant REPORT = keccak256("quality-report");
@@ -111,6 +114,12 @@ contract QualityLedgerTest is BaseTest {
 
     function test_Constructor_RevertsOnZeroAddresses() public {
         vm.expectRevert(QualityLedger.InvalidAccount.selector);
-        new QualityLedger(IDataRegistry(address(0)), admin);
+        new QualityLedger(IDataRegistry(address(0)), admin, ADMIN_DELAY);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControlDefaultAdminRules.AccessControlInvalidDefaultAdmin.selector, address(0)
+            )
+        );
+        new QualityLedger(registry, address(0), ADMIN_DELAY);
     }
 }

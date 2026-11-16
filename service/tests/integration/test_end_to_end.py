@@ -161,7 +161,7 @@ def test_signed_request_cannot_be_replayed(env: Env):
 
     dataset_id, _ = publish_orders(env)
     path = f"/api/datasets/{dataset_id}/versions/1/download"
-    headers = sign_headers(env.owner, "GET", path)
+    headers = sign_headers(env.owner, env.api.signing_domain(), "GET", path)
     http = env.api._http
     assert http.get(path, headers=headers).status_code == 200
     assert http.get(path, headers=headers).status_code == 401
@@ -266,8 +266,10 @@ def test_quality_attestation_flow(env: Env):
 
     failed = audit_quality(env.chain, env.api, env.auditor, dataset_id, 1)
     passed = audit_quality(env.chain, env.api, env.auditor, dataset_id, 2)
-    assert failed["passed"] is False and failed["score_bps"] < 10_000
-    assert passed["passed"] is True and passed["score_bps"] == 10_000
+    assert failed["passed"] is False
+    assert failed["score_bps"] < 10_000
+    assert passed["passed"] is True
+    assert passed["score_bps"] == 10_000
 
     env.sync()
     versions = {v["version"]: v for v in env.api.dataset(dataset_id)["versions"]}

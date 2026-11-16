@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {DataRegistry} from "../src/DataRegistry.sol";
 import {IDataRegistry} from "../src/interfaces/IDataRegistry.sol";
 import {BaseTest} from "./Base.t.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {
+    IAccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/IAccessControlDefaultAdminRules.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract DataRegistryTest is BaseTest {
@@ -446,7 +449,61 @@ contract DataRegistryTest is BaseTest {
     }
 
     function test_Constructor_RevertsOnZeroAdmin() public {
-        vm.expectRevert(DataRegistry.InvalidAccount.selector);
-        new DataRegistry(address(0));
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControlDefaultAdminRules.AccessControlInvalidDefaultAdmin.selector, address(0)
+            )
+        );
+        new DataRegistry(address(0), ADMIN_DELAY);
+    }
+
+    // ------------------------------------------------------------------ admin rules and batching
+
+    function test_Admin_CannotBeGrantedDirectly() public {
+        bytes32 adminRole = registry.DEFAULT_ADMIN_ROLE();
+        vm.expectRevert(IAccessControlDefaultAdminRules.AccessControlEnforcedDefaultAdminRules.selector);
+        vm.prank(admin);
+        registry.grantRole(adminRole, outsider);
+        assertEq(registry.defaultAdmin(), admin);
+        assertEq(registry.defaultAdminDelay(), ADMIN_DELAY);
+    }
+
+    function test_Admin_HandOverWaitsForTheDelay() public {
+        address multisig = makeAddr("multisig");
+        vm.prank(admin);
+        registry.beginDefaultAdminTransfer(multisig);
+        (address pending, uint48 schedule) = registry.pendingDefaultAdmin();
+        assertEq(pending, multisig);
+        assertEq(schedule, block.timestamp + ADMIN_DELAY);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControlDefaultAdminRules.AccessControlEnforcedDefaultAdminDelay.selector, schedule
+            )
+        );
+        vm.prank(multisig);
+        registry.acceptDefaultAdminTransfer();
+
+        vm.warp(schedule + 1);
+        vm.prank(multisig);
+        registry.acceptDefaultAdminTransfer();
+        assertEq(registry.defaultAdmin(), multisig);
+        assertFalse(registry.hasRole(registry.DEFAULT_ADMIN_ROLE(), admin));
+    }
+
+    function test_Multicall_BatchesOwnerActions() public {
+        uint256 id = _register(IDataRegistry.Classification.Internal);
+        bytes[] memory calls = new bytes[](2);
+        calls[0] = abi.encodeCall(DataRegistry.setSteward, (id, steward, true));
+        calls[1] = abi.encodeCall(DataRegistry.updateMetadata, (id, "dl://documents/next"));
+        vm.prank(owner);
+        registry.multicall(calls);
+        assertTrue(registry.isSteward(id, steward));
+        assertEq(registry.getDataset(id).metadataURI, "dl://documents/next");
+    }
+
+    function test_SupportsAccessControlInterfaces() public view {
+        assertTrue(registry.supportsInterface(type(IAccessControlDefaultAdminRules).interfaceId));
+        assertTrue(registry.supportsInterface(type(IAccessControl).interfaceId));
     }
 }

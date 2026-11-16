@@ -6,7 +6,9 @@ import hashlib
 import json
 import logging
 import secrets
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,6 +28,7 @@ from .storage import (
     LocalObjectStore,
     ObjectNotFound,
     ObjectStore,
+    S3ObjectStore,
     StorageIntegrityError,
     object_uri,
     parse_object_uri,
@@ -58,6 +61,35 @@ class InvalidInput(Exception):
     pass
 
 
+class RateLimited(Exception):
+    """Too many relayed requests from one account."""
+
+
+class RelayLimiter:
+    """Sliding one-hour window per requester, so a relayer cannot be drained by one key."""
+
+    def __init__(self, per_hour: int) -> None:
+        self.per_hour = per_hour
+        self._hits: dict[str, list[float]] = {}
+        self._lock = threading.Lock()
+
+    def _recent(self, account: str, now: float) -> list[float]:
+        recent = [t for t in self._hits.get(account, []) if now - t < 3600]
+        self._hits[account] = recent
+        return recent
+
+    def check(self, account: str) -> None:
+        with self._lock:
+            if len(self._recent(account, time.monotonic())) >= self.per_hour:
+                raise RateLimited("relay limit reached for this account; try again later or send the transaction")
+
+    def record(self, account: str) -> None:
+        """Only relays that went on-chain count: a bad signature fails gas estimation and costs nothing."""
+        with self._lock:
+            now = time.monotonic()
+            self._recent(account, now).append(now)
+
+
 def sha256_hex(data: bytes) -> str:
     return "0x" + hashlib.sha256(data).hexdigest()
 
@@ -70,6 +102,19 @@ def parse_document_uri(uri: str) -> str:
     if not uri.startswith(DOCUMENT_PREFIX):
         raise InvalidInput(f"not a document URI: {uri!r}")
     return uri[len(DOCUMENT_PREFIX) :]
+
+
+def make_store(settings: Settings) -> ObjectStore:
+    if settings.object_store == "s3":
+        if not settings.s3_bucket:
+            raise ValueError("DATALEDGER_S3_BUCKET is required when DATALEDGER_OBJECT_STORE=s3")
+        return S3ObjectStore(
+            settings.s3_bucket,
+            settings.s3_prefix,
+            endpoint_url=settings.s3_endpoint_url,
+            region_name=settings.s3_region,
+        )
+    return LocalObjectStore(settings.object_store_dir)
 
 
 @dataclass
@@ -103,6 +148,8 @@ class Platform:
             confirmations=settings.indexer_confirmations,
             batch_blocks=settings.indexer_batch_blocks,
         )
+        self.relay_limiter = RelayLimiter(settings.relay_max_per_hour)
+        self.on_event: Callable[[str], None] = lambda _event: None  # metrics hook, set by the API
 
     @classmethod
     def from_settings(cls, settings: Settings) -> Platform:
@@ -111,16 +158,25 @@ class Platform:
         deployment = Deployment.load(settings.deployment_file)
         chain = Chain(settings.rpc_url, deployment)
         engine = db.make_engine(settings.database_url)
-        db.init_db(engine)
+        if settings.auto_migrate:
+            db.init_db(engine)
         ring = KeyRing.parse(settings.master_keys.get_secret_value())
-        gateway = (
-            Account.from_key(settings.gateway_private_key.get_secret_value()) if settings.gateway_private_key else None
-        )
-        return cls(settings, chain, engine, LocalObjectStore(settings.object_store_dir), ring, gateway)
+        gateway_key = settings.gateway_private_key.get_secret_value() if settings.gateway_private_key else ""
+        gateway = Account.from_key(gateway_key) if gateway_key else None  # empty: reads are not logged on-chain
+        return cls(settings, chain, engine, make_store(settings), ring, gateway)
 
     # ------------------------------------------------------------------ gateway audit
 
-    def _audit(self, event: str, summary: str, *, dataset_id=None, version=None, actor=None, **details) -> None:
+    def _audit(
+        self,
+        event: str,
+        summary: str,
+        *,
+        dataset_id: int | None = None,
+        version: int | None = None,
+        actor: str | None = None,
+        **details: Any,
+    ) -> None:
         with self.engine.begin() as conn:
             conn.execute(
                 db.audit_events.insert().values(
@@ -198,6 +254,7 @@ class Platform:
         content_hash = sha256_hex(data)
         sealed, wrapped = encrypt_object(data, self.ring, aad=bytes.fromhex(content_hash[2:]))
         object_id = self.store.put(sealed)
+        self.on_event("upload_staged")
         result = {
             "object_id": object_id,
             "storage_uri": object_uri(object_id),
@@ -297,12 +354,14 @@ class Platform:
         if self.gateway is not None:
             tx = self.chain.log_access(self.gateway, dataset_id, version, accessor, bytes.fromhex(receipt[2:]))
             tx_hash = "0x" + bytes(tx["transactionHash"]).hex()
+            self.on_event("read_logged")
         else:
             log.warning("no gateway key configured; read of %s v%s is not logged on-chain", dataset_id, version)
         return data, receipt, tx_hash
 
     def record_proof(self, dataset_id: int, version: int, index: int, accessor: str) -> dict[str, Any]:
         self.require_access(dataset_id, accessor)
+        self.on_event("record_proof")
         data = self.load_version(dataset_id, version)
         if not 0 <= index < data.parsed.record_count:
             raise NotFound(f"record {index} out of range")
@@ -402,6 +461,55 @@ class Platform:
             "checked_on_chain": True,
         }
 
+    # ------------------------------------------------------------------ gasless access requests
+
+    RELAY_DEADLINE_SECONDS = 900
+
+    def prepare_access_request(self, dataset_id: int, requester: str, purpose: str) -> dict[str, Any]:
+        """EIP-712 payload the requester signs; the gateway relays it with `relay_access_request`."""
+        if not purpose.strip():
+            raise InvalidInput("purpose must not be empty")
+        if not self.chain.exists(dataset_id):
+            raise NotFound(f"dataset {dataset_id} does not exist")
+        requester = to_checksum_address(requester)
+        deadline = int(time.time()) + self.RELAY_DEADLINE_SECONDS
+        nonce = self.chain.access_nonce(requester)
+        return self.chain.access_request_typed_data(dataset_id, requester, purpose, nonce, deadline)
+
+    def relay_access_request(
+        self, dataset_id: int, requester: str, purpose: str, deadline: int, signature: str
+    ) -> dict[str, Any]:
+        """Submits a signed request on-chain. The contract checks the signature (ECDSA or ERC-1271)."""
+        if self.gateway is None or not self.settings.relay_enabled:
+            raise Forbidden("this gateway does not relay access requests")
+        if deadline < int(time.time()):
+            raise InvalidInput("the signed request has expired")
+        requester = to_checksum_address(requester)
+        try:
+            raw = bytes.fromhex(signature.removeprefix("0x"))
+        except ValueError as exc:
+            raise InvalidInput("signature must be hex") from exc
+        self.relay_limiter.check(requester)
+        request_id, tx_hash = self.chain.request_access_with_sig(
+            self.gateway, dataset_id, requester, purpose, deadline, raw
+        )
+        self.relay_limiter.record(requester)
+        self.on_event("relayed_request")
+        self._audit(
+            "AccessRequestRelayed",
+            f"Access request #{request_id} from {requester[:6]}…{requester[-4:]} relayed by the gateway",
+            dataset_id=dataset_id,
+            actor=requester,
+            request_id=request_id,
+            tx_hash=tx_hash,
+        )
+        return {
+            "request_id": request_id,
+            "tx_hash": tx_hash,
+            "requester": requester,
+            "relayed_by": self.gateway.address,
+        }
+
     # ------------------------------------------------------------------ erasure
 
     def shred(self, dataset_id: int, version: int, actor: str) -> dict[str, Any]:
@@ -419,6 +527,7 @@ class Platform:
                 .values(state="shredded", wrapped_key=None, kek_id=None, shredded_at=int(time.time()))
             )
         self.store.delete(row["object_id"])
+        self.on_event("shredded")
         self._audit(
             "CryptoShredded",
             f"Data key and ciphertext of dataset {dataset_id} v{version} destroyed",

@@ -1,6 +1,9 @@
 """Captures the console screenshots used in the README (needs Playwright and a local Chrome or Edge).
 
     uv run --with playwright python ../scripts/capture_screenshots.py [edited.csv] [proof.json]
+
+Fails when the console logs an error, such as a Content-Security-Policy violation. With the observability profile
+running, it also captures the Grafana dashboard.
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 BASE = "http://127.0.0.1:8000"
+GRAFANA = "http://127.0.0.1:3000"
 OUT = Path(__file__).resolve().parents[1] / "docs" / "screenshots"
 
 
@@ -21,6 +25,9 @@ def main() -> None:
     with sync_playwright() as p:
         browser = p.chromium.launch(channel="chrome")
         page = browser.new_page(viewport={"width": 1440, "height": 900}, color_scheme="light")
+        errors: list[str] = []
+        page.on("console", lambda msg: errors.append(msg.text) if msg.type == "error" else None)
+        page.on("pageerror", lambda exc: errors.append(str(exc)))
 
         def shot(route: str, name: str, ready: str, full: bool = False) -> None:
             page.goto(f"{BASE}/#/{route}")
@@ -58,6 +65,20 @@ def main() -> None:
             page.wait_for_timeout(300)
             page.screenshot(path=OUT / "verify.png")
             print("verify.png")
+        if errors:
+            browser.close()
+            raise SystemExit("console errors: " + " | ".join(errors))
+
+        try:
+            page.goto(f"{GRAFANA}/api/health", timeout=3_000)
+        except Exception:
+            print("grafana not running; skipped (docker compose --profile observability up -d)")
+        else:
+            page.goto(f"{GRAFANA}/d/dataledger-overview/dataledger-overview?orgId=1&kiosk&from=now-15m&to=now")
+            page.wait_for_selector("[data-viz-panel-key], .react-grid-item", timeout=20_000)
+            page.wait_for_timeout(4_000)
+            page.screenshot(path=OUT / "grafana.png")
+            print("grafana.png")
         browser.close()
 
 

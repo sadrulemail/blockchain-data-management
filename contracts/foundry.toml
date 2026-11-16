@@ -4,12 +4,13 @@ out = "out"
 libs = ["lib"]
 test = "test"
 script = "script"
-solc_version = "0.8.28"
-evm_version = "cancun"
+solc_version = "0.8.38"
+evm_version = "prague"
 optimizer = true
 optimizer_runs = 200
 bytecode_hash = "none"
 fs_permissions = [{ access = "read-write", path = "./deployments" }]
+gas_reports = ["DataRegistry", "AccessLedger", "QualityLedger"]
 remappings = [
   "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
   "forge-std/=lib/forge-std/src/",
@@ -35,9 +36,22 @@ quote_style = "double"
 number_underscore = "thousands"
 sort_imports = true
 
+# Public endpoints for testnets; point the same names at a private RPC for production traffic.
 [rpc_endpoints]
 anvil = "http://127.0.0.1:8545"
 sepolia = "https://ethereum-sepolia-rpc.publicnode.com"
+base_sepolia = "https://sepolia.base.org"
+arbitrum_sepolia = "https://sepolia-rollup.arbitrum.io/rpc"
+optimism_sepolia = "https://sepolia.optimism.io"
+polygon_amoy = "https://rpc-amoy.polygon.technology"
+
+# Source verification through the Etherscan V2 API: one ETHERSCAN_API_KEY covers every chain below.
+[etherscan]
+sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 11155111 }
+base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }
+arbitrum_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 421614 }
+optimism_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 11155420 }
+polygon_amoy = { key = "${ETHERSCAN_API_KEY}", chain = 80002 }
 
 [lint]
 # `registry()` keeps a camelCase getter for a readable ABI; keccak256 is kept in Solidity for clarity over gas.

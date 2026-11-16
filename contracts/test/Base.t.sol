@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {AccessLedger} from "../src/AccessLedger.sol";
 import {DataRegistry} from "../src/DataRegistry.sol";
@@ -12,6 +12,7 @@ abstract contract BaseTest is Test {
     bytes32 internal constant SCHEMA_V2 = keccak256("schema:sales_orders:v2");
     string internal constant METADATA = "dl://documents/9f2c";
     string internal constant STORAGE = "dl://objects/4b1e";
+    uint48 internal constant ADMIN_DELAY = 2 days;
 
     DataRegistry internal registry;
     AccessLedger internal access;
@@ -28,9 +29,9 @@ abstract contract BaseTest is Test {
     function setUp() public virtual {
         vm.warp(1_790_000_000);
         vm.startPrank(admin);
-        registry = new DataRegistry(admin);
-        access = new AccessLedger(registry, admin);
-        quality = new QualityLedger(registry, admin);
+        registry = new DataRegistry(admin, ADMIN_DELAY);
+        access = new AccessLedger(registry, admin, ADMIN_DELAY);
+        quality = new QualityLedger(registry, admin, ADMIN_DELAY);
         registry.grantRole(registry.PUBLISHER_ROLE(), owner);
         access.grantRole(access.GATEWAY_ROLE(), gateway);
         quality.grantRole(quality.AUDITOR_ROLE(), auditor);

@@ -1,54 +1,111 @@
 [project]
 name = "dataledger"
-version = "1.0.0"
+version = "1.1.0"
 description = "Off-chain data service for the blockchain data management platform: anchoring, encryption, indexing and access gateway."
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
 authors = [{ name = "Sadrul" }]
+classifiers = [
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Framework :: FastAPI",
+  "Typing :: Typed",
+]
 dependencies = [
-  "fastapi>=0.115",
-  "uvicorn[standard]>=0.32",
-  "python-multipart>=0.0.12",
-  "web3>=7.6,<8",
-  "eth-account>=0.13",
-  "cryptography>=43",
-  "sqlalchemy>=2.0.36",
-  "pydantic>=2.9",
-  "pydantic-settings>=2.6",
-  "typer>=0.13",
+  "fastapi>=0.163",
+  "uvicorn[standard]>=0.38",
+  "python-multipart>=0.0.20",
+  "web3>=8.0,<9",
+  "eth-account>=0.13.7",
+  "cryptography>=46",
+  "sqlalchemy>=2.1",
+  "alembic>=1.20",
+  "pydantic>=2.14",
+  "pydantic-settings>=2.12",
+  "typer>=0.20",
   "httpx>=0.28",
+  "prometheus-client>=0.26",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.3"]
+s3 = ["boto3>=1.44"]
+otel = [
+  "opentelemetry-sdk>=1.45",
+  "opentelemetry-exporter-otlp-proto-http>=1.45",
+  "opentelemetry-instrumentation-fastapi>=0.66b0",
 ]
 
 [project.scripts]
 dataledger = "dataledger.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.3", "ruff>=0.8"]
+dev = [
+  "pytest>=9",
+  "pytest-cov>=7",
+  "ruff>=0.17",
+  "mypy>=2.4",
+  "moto[s3]>=5.2",
+  "boto3-stubs[s3]>=1.44",
+]
 
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dataledger"]
 
+[tool.uv]
+default-groups = ["dev"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
 markers = ["chain: needs anvil and compiled contracts"]
 filterwarnings = [
   "ignore::DeprecationWarning:websockets.*",
   "ignore:Using `httpx` with `starlette.testclient`",
 ]
 
+[tool.coverage.run]
+source = ["dataledger"]
+branch = true
+# Alembic loads revisions by path, outside coverage's view; test_migrations.py runs every one of them.
+omit = ["*/migrations/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85
+exclude_also = ["if TYPE_CHECKING:", "pragma: no cover", "raise NotImplementedError"]
+
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py312"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "N", "S"]
-ignore = ["S101", "S311", "RUF001", "N818"]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "N", "S", "ASYNC", "PT", "PERF", "LOG", "G"]
+ignore = ["S101", "S311", "RUF001", "N818", "G004"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S108", "S603", "S607"]
+"src/dataledger/migrations/**" = ["N999"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["dataledger"]
+mypy_path = "src"
+strict_optional = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = false
+check_untyped_defs = true
+no_implicit_reexport = false
+disallow_incomplete_defs = true
+
+[[tool.mypy.overrides]]
+module = ["eth_abi.*", "eth_utils.*", "moto.*", "opentelemetry.*"]
+ignore_missing_imports = true

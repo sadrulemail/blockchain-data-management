@@ -7,7 +7,7 @@ import time
 from collections import defaultdict, deque
 from typing import Any
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Connection, Engine, func, select
 
 from . import db
 from .chain import Classification, VersionStatus
@@ -29,7 +29,7 @@ def _version_dict(row: Any) -> dict[str, Any]:
     return d
 
 
-def _quality_by_version(conn, dataset_id: int | None = None) -> dict[tuple[int, int], dict[str, Any]]:
+def _quality_by_version(conn: Connection, dataset_id: int | None = None) -> dict[tuple[int, int], dict[str, Any]]:
     stmt = select(db.attestations)
     if dataset_id is not None:
         stmt = stmt.where(db.attestations.c.dataset_id == dataset_id)
@@ -54,7 +54,10 @@ def overview(engine: Engine) -> dict[str, Any]:
         stats = {
             "datasets": scalar(select(func.count()).select_from(db.datasets)).scalar_one(),
             "versions": scalar(select(func.count()).select_from(db.versions)).scalar_one(),
-            "records_anchored": scalar(select(func.coalesce(func.sum(db.versions.c.record_count), 0))).scalar_one(),
+            # SUM() of a bigint is NUMERIC on PostgreSQL; keep the API an integer on every database.
+            "records_anchored": int(
+                scalar(select(func.coalesce(func.sum(db.versions.c.record_count), 0))).scalar_one()
+            ),
             "active_grants": scalar(
                 select(func.count())
                 .select_from(db.grants)
@@ -89,12 +92,12 @@ def list_datasets(engine: Engine) -> list[dict[str, Any]]:
         for row in conn.execute(select(db.versions).order_by(db.versions.c.version)).mappings():
             latest[row["dataset_id"]] = _version_dict(row)
         grants = defaultdict(int)
-        for row in conn.execute(
+        for grant_row in conn.execute(
             select(db.grants.c.dataset_id, func.count().label("n"))
             .where((db.grants.c.revoked.is_(False)) & (db.grants.c.expires_at > now))
             .group_by(db.grants.c.dataset_id)
         ):
-            grants[row.dataset_id] = row.n
+            grants[grant_row.dataset_id] = grant_row.n
         quality = _quality_by_version(conn)
     for d in datasets:
         v = latest.get(d["dataset_id"])

@@ -6,9 +6,10 @@ import time
 from typing import Any
 
 import httpx
+from eth_account.messages import encode_typed_data
 from eth_account.signers.local import LocalAccount
 
-from .auth import sign_headers
+from .auth import SigningDomain, sign_headers
 
 
 class ApiError(Exception):
@@ -28,6 +29,7 @@ class ApiClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.account = account
+        self._domain: SigningDomain | None = None
         self._http = httpx.Client(base_url=base_url.rstrip("/"), timeout=timeout, transport=transport)
 
     @classmethod
@@ -35,6 +37,7 @@ class ApiClient:
         """Uses an existing httpx client (for example a FastAPI TestClient)."""
         client = cls.__new__(cls)
         client.account = account
+        client._domain = None
         client._http = http
         return client
 
@@ -48,15 +51,25 @@ class ApiClient:
         self.close()
 
     def as_account(self, account: LocalAccount) -> ApiClient:
-        return ApiClient.wrap(self._http, account)
+        client = ApiClient.wrap(self._http, account)
+        client._domain = self._domain
+        return client
+
+    def signing_domain(self) -> SigningDomain:
+        """EIP-712 domain published by the gateway (cached)."""
+        if self._domain is None:
+            data = self._request("GET", "/api/auth/domain").json()["domain"]
+            self._domain = SigningDomain(int(data["chainId"]), data["verifyingContract"])
+        return self._domain
 
     def _request(self, method: str, path: str, *, signed: bool = False, **kwargs: Any) -> httpx.Response:
-        headers = kwargs.pop("headers", {})
+        request = self._http.build_request(method, path, **kwargs)
         if signed:
             if self.account is None:
                 raise ValueError("this call needs a signing account")
-            headers.update(sign_headers(self.account, method, path))
-        response = self._http.request(method, path, headers=headers, **kwargs)
+            body = request.read()  # the exact bytes that go on the wire, multipart boundary included
+            request.headers.update(sign_headers(self.account, self.signing_domain(), method, request.url.path, body))
+        response = self._http.send(request)
         if response.status_code >= 400:
             try:
                 detail = response.json().get("detail")
@@ -125,6 +138,30 @@ class ApiClient:
 
     def shred(self, dataset_id: int, version: int) -> dict[str, Any]:
         return self._request("POST", f"/api/datasets/{dataset_id}/versions/{version}/shred", signed=True).json()
+
+    # ------------------------------------------------------------------ gasless access requests
+
+    def request_access_gasless(self, dataset_id: int, purpose: str) -> dict[str, Any]:
+        """Signs an EIP-712 access request locally and has the gateway submit it; the signer pays no gas."""
+        if self.account is None:
+            raise ValueError("this call needs a signing account")
+        body = {"dataset_id": dataset_id, "requester": self.account.address, "purpose": purpose}
+        typed = self._request("POST", "/api/relay/access-requests/prepare", json=body).json()
+        message = typed.get("message", {})
+        expected = (dataset_id, self.account.address.lower(), purpose)
+        if (
+            typed.get("primaryType") != "AccessRequest"
+            or (
+                message.get("datasetId"),
+                str(message.get("requester", "")).lower(),
+                message.get("purpose"),
+            )
+            != expected
+        ):
+            raise ApiError(502, "gateway returned typed data that does not match the request; not signing")
+        signature = self.account.sign_message(encode_typed_data(full_message=typed)).signature
+        submit = {**body, "deadline": typed["message"]["deadline"], "signature": "0x" + bytes(signature).hex()}
+        return self._request("POST", "/api/relay/access-requests", json=submit).json()
 
     # ------------------------------------------------------------------ public verification
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -16,6 +17,7 @@ from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
+from sqlalchemy import create_engine, text
 from web3 import Web3
 
 from dataledger.api import create_app
@@ -114,6 +116,37 @@ def _artifact(name: str) -> tuple[list, str]:
     return data["abi"], data["bytecode"]["object"]
 
 
+def deploy_contract(url: str, deployer: LocalAccount, name: str, *args) -> str:
+    """Deploys any compiled contract from `contracts/out` (test helpers included) and returns its address."""
+    w3 = Web3(Web3.HTTPProvider(url))
+    abi, bytecode = _artifact(name)
+    tx = (
+        w3.eth.contract(abi=abi, bytecode=bytecode)
+        .constructor(*args)
+        .build_transaction(
+            {"from": deployer.address, "nonce": w3.eth.get_transaction_count(deployer.address, "pending")}
+        )
+    )
+    receipt = w3.eth.wait_for_transaction_receipt(
+        w3.eth.send_raw_transaction(deployer.sign_transaction(tx).raw_transaction)
+    )
+    assert receipt["status"] == 1
+    return receipt["contractAddress"]
+
+
+def _database_url(tmp_path: Path) -> str:
+    """SQLite per test by default; DATALEDGER_TEST_DATABASE_URL runs the same suite on PostgreSQL."""
+    url = os.environ.get("DATALEDGER_TEST_DATABASE_URL")
+    if not url:
+        return f"sqlite:///{(tmp_path / 'dataledger.db').as_posix()}"
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    engine.dispose()
+    return url
+
+
 def deploy_ledgers(url: str, admin: LocalAccount, gateway: str, auditor: str, publishers: list[str]) -> Deployment:
     w3 = Web3(Web3.HTTPProvider(url))
     chain_id = w3.eth.chain_id
@@ -130,10 +163,11 @@ def deploy_ledgers(url: str, admin: LocalAccount, gateway: str, auditor: str, pu
         return receipt
 
     addresses = {}
+    delay = 2 * 86_400
     for name, args in (
-        ("DataRegistry", lambda: [admin.address]),
-        ("AccessLedger", lambda: [addresses["DataRegistry"], admin.address]),
-        ("QualityLedger", lambda: [addresses["DataRegistry"], admin.address]),
+        ("DataRegistry", lambda: [admin.address, delay]),
+        ("AccessLedger", lambda: [addresses["DataRegistry"], admin.address, delay]),
+        ("QualityLedger", lambda: [addresses["DataRegistry"], admin.address, delay]),
     ):
         abi, bytecode = _artifact(name)
         receipt = send(w3.eth.contract(abi=abi, bytecode=bytecode).constructor(*args()))
@@ -156,6 +190,7 @@ def deploy_ledgers(url: str, admin: LocalAccount, gateway: str, auditor: str, pu
 
 @dataclass
 class Env:
+    url: str
     platform: Platform
     chain: Chain
     api: ApiClient
@@ -186,7 +221,7 @@ def env(anvil_url: str, tmp_path: Path) -> Iterator[Env]:
     settings = Settings(
         rpc_url=anvil_url,
         deployment_file=deployment_file,
-        database_url=f"sqlite:///{(tmp_path / 'dataledger.db').as_posix()}",
+        database_url=_database_url(tmp_path),
         object_store_dir=tmp_path / "objects",
         master_keys=SecretStr(KeyRing.generate_entry("k1")),
         gateway_private_key=SecretStr(ANVIL_KEYS[1]),
@@ -196,6 +231,7 @@ def env(anvil_url: str, tmp_path: Path) -> Iterator[Env]:
     app = create_app(platform, start_indexer=False)
     with TestClient(app) as http:
         yield Env(
+            url=anvil_url,
             platform=platform,
             chain=platform.chain,
             api=ApiClient.wrap(http),
@@ -208,3 +244,4 @@ def env(anvil_url: str, tmp_path: Path) -> Iterator[Env]:
             steward=steward,
             tmp=tmp_path,
         )
+    platform.engine.dispose()

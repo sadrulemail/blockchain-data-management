@@ -73,7 +73,7 @@ class QualityReport:
         }
 
 
-def _result(name: str, severity: str, rows: list[int], column: str | None = None, detail: str = ""):
+def _result(name: str, severity: str, rows: list[int], column: str | None = None, detail: str = "") -> CheckResult:
     return CheckResult(
         name=name,
         severity=severity,

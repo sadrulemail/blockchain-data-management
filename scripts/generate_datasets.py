@@ -99,8 +99,18 @@ def orders(customer_rows, catalog_rows, start: date, days: int, first_id: int, c
         discount = RNG.choice([1, 1, 1, 0.95, 0.9, 0.85])
         unit_price = round(float(product[3]) * discount, 2)
         order_date = start + timedelta(days=RNG.randint(0, days - 1))
-        rows.append([first_id + n, customer[0], order_date.isoformat(), product[0], quantity, f"{unit_price:.2f}",
-                     "USD", RNG.choice(STATUSES)])
+        rows.append(
+            [
+                first_id + n,
+                customer[0],
+                order_date.isoformat(),
+                product[0],
+                quantity,
+                f"{unit_price:.2f}",
+                "USD",
+                RNG.choice(STATUSES),
+            ]
+        )
     rows.sort(key=lambda r: (r[2], r[0]))
     return rows
 

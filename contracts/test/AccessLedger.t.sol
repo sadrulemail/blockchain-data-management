@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {AccessLedger} from "../src/AccessLedger.sol";
 import {IDataRegistry} from "../src/interfaces/IDataRegistry.sol";
 import {BaseTest} from "./Base.t.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {
+    IAccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/IAccessControlDefaultAdminRules.sol";
 
 contract AccessLedgerTest is BaseTest {
     uint64 internal constant THIRTY_DAYS = 30 days;
@@ -266,8 +269,12 @@ contract AccessLedgerTest is BaseTest {
 
     function test_Constructor_RevertsOnZeroAddresses() public {
         vm.expectRevert(AccessLedger.InvalidAccount.selector);
-        new AccessLedger(IDataRegistry(address(0)), admin);
-        vm.expectRevert(AccessLedger.InvalidAccount.selector);
-        new AccessLedger(registry, address(0));
+        new AccessLedger(IDataRegistry(address(0)), admin, ADMIN_DELAY);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IAccessControlDefaultAdminRules.AccessControlInvalidDefaultAdmin.selector, address(0)
+            )
+        );
+        new AccessLedger(registry, address(0), ADMIN_DELAY);
     }
 }

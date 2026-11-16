@@ -59,30 +59,103 @@ def _parse_parent(value: str) -> tuple[int, int]:
 def serve(
     host: str = "127.0.0.1",
     port: int = 8000,
-    indexer: Annotated[bool, typer.Option(help="Run the event indexer in the same process.")] = True,
+    indexer: Annotated[
+        bool | None, typer.Option("--indexer/--no-indexer", help="Run the event indexer in this process.")
+    ] = None,
+    workers: Annotated[int, typer.Option(help="Uvicorn workers; use 1 when the indexer runs in-process.")] = 1,
 ) -> None:
-    """Run the API, the web console and (by default) the indexer."""
+    """Run the API and the web console (and, unless DATALEDGER_RUN_INDEXER=false, the indexer)."""
     import uvicorn
 
     from .api import create_app
+    from .observability import configure_logging
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    uvicorn.run(create_app(start_indexer=indexer), host=host, port=port)
+    settings = get_settings()
+    configure_logging(settings.log_level, settings.log_format)
+    if workers > 1 and (settings.run_indexer if indexer is None else indexer):
+        raise typer.BadParameter("run the indexer separately (`dataledger index`) when using several workers")
+    uvicorn.run(
+        create_app(start_indexer=indexer),
+        host=host,
+        port=port,
+        workers=workers,
+        log_config=None,
+        proxy_headers=True,
+        server_header=False,
+        timeout_graceful_shutdown=20,
+    )
 
 
 @app.command()
-def index(once: bool = False) -> None:
-    """Run the event indexer on its own (for split deployments)."""
+def index(
+    once: bool = False,
+    metrics_port: Annotated[int, typer.Option(help="Serve Prometheus metrics on this port (0 = off).")] = 0,
+) -> None:
+    """Run the event indexer on its own (split deployments). Stops cleanly on SIGTERM."""
+    import signal
     import threading
 
-    from .platform import Platform
+    from prometheus_client import CollectorRegistry, start_http_server
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    platform = Platform.from_settings(get_settings())
-    if once:
-        typer.echo(f"applied {platform.indexer.sync()} events; cursor at block {platform.indexer.cursor()}")
-        return
-    platform.indexer.run_forever(threading.Event(), get_settings().indexer_poll_seconds)
+    from . import db
+    from .indexer import Indexer
+    from .observability import ChainCollector, configure_logging
+
+    settings = get_settings()
+    configure_logging(settings.log_level, settings.log_format)
+    chain = _chain()
+    engine = db.make_engine(settings.database_url)
+    if settings.auto_migrate:
+        db.init_db(engine)
+    indexer = Indexer(
+        chain, engine, confirmations=settings.indexer_confirmations, batch_blocks=settings.indexer_batch_blocks
+    )
+    try:
+        if once:
+            typer.echo(f"applied {indexer.sync()} events; cursor at block {indexer.cursor()}")
+            return
+        if metrics_port:
+            registry = CollectorRegistry()
+            registry.register(ChainCollector(chain, indexer))
+            start_http_server(metrics_port, registry=registry)
+        stop = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: stop.set())
+        logging.getLogger(__name__).info("indexer started at block %s", indexer.cursor() + 1)
+        indexer.run_forever(stop, settings.indexer_poll_seconds)
+        logging.getLogger(__name__).info("indexer stopped at block %s", indexer.cursor())
+    finally:
+        engine.dispose()
+
+
+db_app = typer.Typer(help="Database schema (Alembic migrations).", no_args_is_help=True)
+app.add_typer(db_app, name="db")
+
+
+@db_app.command("upgrade")
+def db_upgrade(revision: str = "head") -> None:
+    """Apply migrations up to REVISION (default: the latest)."""
+    from . import db
+
+    engine = db.make_engine(get_settings().database_url)
+    try:
+        reached = db.migrate(engine, revision)
+    finally:
+        engine.dispose()
+    typer.echo(f"database at revision {reached}")
+
+
+@db_app.command("current")
+def db_current() -> None:
+    """Print the revision the database is on."""
+    from alembic.runtime.migration import MigrationContext
+
+    from . import db
+
+    engine = db.make_engine(get_settings().database_url)
+    with engine.connect() as conn:
+        typer.echo(MigrationContext.configure(conn).get_current_revision() or "none")
+    engine.dispose()
 
 
 @app.command()
@@ -96,7 +169,11 @@ def rotate_keys() -> None:
     """Re-wrap every data key under the first (active) entry of DATALEDGER_MASTER_KEYS."""
     from .platform import Platform
 
-    moved = Platform.from_settings(get_settings()).rotate_keys()
+    platform = Platform.from_settings(get_settings())
+    try:
+        moved = platform.rotate_keys()
+    finally:
+        platform.engine.dispose()
     typer.echo(f"re-wrapped {moved} data keys")
 
 
@@ -204,10 +281,19 @@ def shred(
 
 
 @app.command("request-access")
-def request_access(dataset: int, purpose: str, key_env: KeyEnv = "DATALEDGER_PRIVATE_KEY") -> None:
+def request_access(
+    dataset: int,
+    purpose: str,
+    gasless: Annotated[bool, typer.Option(help="Sign an EIP-712 request and let the gateway pay the gas.")] = False,
+    key_env: KeyEnv = "DATALEDGER_PRIVATE_KEY",
+) -> None:
     """Ask the dataset owner for access, stating the purpose."""
-    request_id = _chain().request_access(_account(key_env), dataset, purpose)
-    _print({"request_id": request_id})
+    signer = _account(key_env)
+    if gasless:
+        with _api(signer) as api:
+            _print(api.request_access_gasless(dataset, purpose))
+        return
+    _print({"request_id": _chain().request_access(signer, dataset, purpose)})
 
 
 @app.command()

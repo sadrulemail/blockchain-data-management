@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {IDataRegistry} from "./interfaces/IDataRegistry.sol";
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {
+    AccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
+import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
@@ -10,7 +13,9 @@ import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProo
 /// @notice On-chain catalogue of datasets and their immutable versions. Data never lives here: each version anchors
 ///         a Merkle root over canonical records, a SHA-256 fingerprint of the file and a pointer to encrypted storage.
 ///         Versions can name parent versions, which builds a verifiable lineage graph across datasets.
-contract DataRegistry is IDataRegistry, AccessControl, Pausable {
+/// @dev The admin role has a single holder and moves in two steps with a delay (`AccessControlDefaultAdminRules`),
+///      so a mistyped address or a stolen key cannot take over the registry at once. `multicall` batches calls.
+contract DataRegistry is IDataRegistry, AccessControlDefaultAdminRules, Pausable, Multicall {
     bytes32 public constant PUBLISHER_ROLE = keccak256("PUBLISHER_ROLE");
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
@@ -73,9 +78,9 @@ contract DataRegistry is IDataRegistry, AccessControl, Pausable {
     error InvalidAccount();
     error NotPendingOwner(uint256 datasetId, address account);
 
-    constructor(address admin) {
-        if (admin == address(0)) revert InvalidAccount();
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+    /// @param admin Holder of `DEFAULT_ADMIN_ROLE` and the first `PAUSER_ROLE`.
+    /// @param adminTransferDelay Seconds a new admin must wait before accepting the role.
+    constructor(address admin, uint48 adminTransferDelay) AccessControlDefaultAdminRules(adminTransferDelay, admin) {
         _grantRole(PAUSER_ROLE, admin);
     }
 
@@ -122,21 +127,7 @@ contract DataRegistry is IDataRegistry, AccessControl, Pausable {
         if (parents.length > MAX_PARENTS) revert TooManyParents(parents.length);
 
         version = ++ds.versionCount;
-
-        for (uint256 i = 0; i < parents.length; ++i) {
-            VersionRef calldata parent = parents[i];
-            VersionStatus parentStatus = _versions[parent.datasetId][parent.version].status;
-            if (parentStatus != VersionStatus.Active && parentStatus != VersionStatus.Deprecated) {
-                revert ParentNotUsable(parent.datasetId, parent.version);
-            }
-            for (uint256 j = 0; j < i; ++j) {
-                if (parents[j].datasetId == parent.datasetId && parents[j].version == parent.version) {
-                    revert DuplicateParent(parent.datasetId, parent.version);
-                }
-            }
-            _parents[datasetId][version].push(parent);
-            emit LineageLinked(datasetId, version, parent.datasetId, parent.version);
-        }
+        _linkParents(datasetId, version, parents);
 
         Version storage v = _versions[datasetId][version];
         v.merkleRoot = input.merkleRoot;
@@ -310,6 +301,26 @@ contract DataRegistry is IDataRegistry, AccessControl, Pausable {
     // ---------------------------------------------------------------------------------------------------------------
     // Internal guards
     // ---------------------------------------------------------------------------------------------------------------
+
+    /// @dev Parents must be live (Active or Deprecated) and distinct. The loop is bounded by MAX_PARENTS.
+    function _linkParents(uint256 datasetId, uint32 version, VersionRef[] calldata parents) private {
+        for (uint256 i = 0; i < parents.length; ++i) {
+            VersionRef calldata parent = parents[i];
+            VersionStatus parentStatus = _versions[parent.datasetId][parent.version].status;
+            // Slither reads this enum check as a timestamp comparison (false positive).
+            // slither-disable-next-line timestamp
+            if (parentStatus != VersionStatus.Active && parentStatus != VersionStatus.Deprecated) {
+                revert ParentNotUsable(parent.datasetId, parent.version);
+            }
+            for (uint256 j = 0; j < i; ++j) {
+                if (parents[j].datasetId == parent.datasetId && parents[j].version == parent.version) {
+                    revert DuplicateParent(parent.datasetId, parent.version);
+                }
+            }
+            _parents[datasetId][version].push(parent);
+            emit LineageLinked(datasetId, version, parent.datasetId, parent.version);
+        }
+    }
 
     function _existingDataset(uint256 datasetId) private view returns (Dataset storage) {
         if (!exists(datasetId)) revert UnknownDataset(datasetId);

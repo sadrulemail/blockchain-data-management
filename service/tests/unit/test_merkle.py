@@ -38,9 +38,9 @@ def test_hash_pair_is_commutative():
 
 
 def test_invalid_input():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least one leaf"):
         MerkleTree([])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="32-byte"):
         MerkleTree([b"short"])
     with pytest.raises(IndexError):
         MerkleTree(leaves(3)).proof(3)

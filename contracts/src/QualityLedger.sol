@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {IDataRegistry} from "./interfaces/IDataRegistry.sol";
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {
+    AccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
 
 /// @title QualityLedger
 /// @notice Independent data-quality attestations per dataset version. An auditor runs the checks off-chain,
 ///         publishes the report and signs its hash here. Auditors cannot attest datasets they manage.
-contract QualityLedger is AccessControl {
+contract QualityLedger is AccessControlDefaultAdminRules {
     bytes32 public constant AUDITOR_ROLE = keccak256("AUDITOR_ROLE");
     uint16 public constant MAX_SCORE_BPS = 10_000;
 
@@ -43,10 +45,12 @@ contract QualityLedger is AccessControl {
     error ConflictOfInterest(uint256 datasetId, address auditor);
     error UnknownAttestation(uint256 datasetId, uint32 version, uint256 index);
 
-    constructor(IDataRegistry registry_, address admin) {
-        if (address(registry_) == address(0) || admin == address(0)) revert InvalidAccount();
+    /// @param adminTransferDelay Seconds a new admin must wait before accepting `DEFAULT_ADMIN_ROLE`.
+    constructor(IDataRegistry registry_, address admin, uint48 adminTransferDelay)
+        AccessControlDefaultAdminRules(adminTransferDelay, admin)
+    {
+        if (address(registry_) == address(0)) revert InvalidAccount();
         registry = registry_;
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
     function attest(

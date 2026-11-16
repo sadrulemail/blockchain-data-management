@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity ^0.8.24;
 
 /// @title IDataRegistry
 /// @notice Shared types and read functions of the dataset registry, used by the access and quality ledgers.

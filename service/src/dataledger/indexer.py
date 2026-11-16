@@ -13,7 +13,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
-from eth_utils import event_abi_to_log_topic
+from eth_typing import HexStr
+from eth_utils import event_abi_to_log_topic, keccak, to_checksum_address
 from sqlalchemy import Connection, Engine, delete, select, update
 from web3.datastructures import AttributeDict
 from web3.exceptions import BlockNotFound
@@ -134,9 +135,9 @@ class Indexer:
                 "fromBlock": start,
                 "toBlock": end,
                 "address": [
-                    self.chain.deployment.data_registry,
-                    self.chain.deployment.access_ledger,
-                    self.chain.deployment.quality_ledger,
+                    to_checksum_address(self.chain.deployment.data_registry),
+                    to_checksum_address(self.chain.deployment.access_ledger),
+                    to_checksum_address(self.chain.deployment.quality_ledger),
                 ],
             }
         )
@@ -306,7 +307,16 @@ class Indexer:
             actor=a["committer"],
         )
 
-    def _link_object(self, conn, dataset_id, version, a, merkle_root, content_hash, schema_hash) -> None:
+    def _link_object(
+        self,
+        conn: Connection,
+        dataset_id: int,
+        version: int,
+        a: dict[str, Any],
+        merkle_root: str,
+        content_hash: str,
+        schema_hash: str | None,
+    ) -> None:
         try:
             object_id = parse_object_uri(a["storageURI"])
         except ValueError:
@@ -526,7 +536,9 @@ class Indexer:
             actor=a.get("approver") or (req["requester"] if req else None),
         )
 
-    def _purpose_text(self, conn: Connection, dataset_id: int, grantee: str, purpose_hash: str, tx_hash: str):
+    def _purpose_text(
+        self, conn: Connection, dataset_id: int, grantee: str, purpose_hash: str, tx_hash: str
+    ) -> str | None:
         text = conn.execute(
             select(db.access_requests.c.purpose)
             .where(
@@ -539,10 +551,19 @@ class Indexer:
         if text:
             return text
         try:
-            tx = self.chain.w3.eth.get_transaction(tx_hash)
+            tx = self.chain.w3.eth.get_transaction(HexStr(tx_hash))
             fn, params = self.chain.access.decode_function_input(tx["input"])
-            if fn.fn_name == "grantAccess":
-                return params["purpose"]
+            calls = [(fn, params)]
+            if fn.fn_name == "multicall":  # batched grants: look inside each call
+                calls = [self.chain.access.decode_function_input(data) for data in params["data"]]
+            for inner, args in calls:
+                if (
+                    inner.fn_name == "grantAccess"
+                    and int(args["datasetId"]) == dataset_id
+                    and str(args["grantee"]).lower() == grantee.lower()
+                    and "0x" + keccak(text=args["purpose"]).hex() == purpose_hash
+                ):
+                    return args["purpose"]
         except Exception:  # noqa: S110 - purpose text is a convenience; the hash is authoritative
             pass
         return None

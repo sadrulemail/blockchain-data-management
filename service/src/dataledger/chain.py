@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import IntEnum
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from eth_abi import decode as abi_decode
 from eth_account.signers.local import LocalAccount
@@ -21,6 +21,36 @@ from web3.logs import DISCARD
 from web3.types import TxReceipt
 
 CONTRACT_NAMES = ("DataRegistry", "AccessLedger", "QualityLedger")
+
+ERC1271_MAGIC = bytes.fromhex("1626ba7e")
+ERC1271_ABI = [
+    {
+        "type": "function",
+        "name": "isValidSignature",
+        "stateMutability": "view",
+        "inputs": [{"name": "hash", "type": "bytes32"}, {"name": "signature", "type": "bytes"}],
+        "outputs": [{"name": "", "type": "bytes4"}],
+    }
+]
+
+# EIP-712 domain fields of AccessLedger (see the constructor in AccessLedger.sol).
+ACCESS_DOMAIN_NAME = "DataLedger AccessLedger"
+ACCESS_DOMAIN_VERSION = "1"
+ACCESS_REQUEST_TYPES: dict[str, list[dict[str, str]]] = {
+    "EIP712Domain": [
+        {"name": "name", "type": "string"},
+        {"name": "version", "type": "string"},
+        {"name": "chainId", "type": "uint256"},
+        {"name": "verifyingContract", "type": "address"},
+    ],
+    "AccessRequest": [
+        {"name": "datasetId", "type": "uint256"},
+        {"name": "requester", "type": "address"},
+        {"name": "purpose", "type": "string"},
+        {"name": "nonce", "type": "uint256"},
+        {"name": "deadline", "type": "uint256"},
+    ],
+}
 
 
 class Classification(IntEnum):
@@ -122,13 +152,13 @@ class Chain:
         self.w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": timeout}))
         self.deployment = deployment
         self.registry = self.w3.eth.contract(
-            address=deployment.data_registry, abi=load_abi("DataRegistry"), decode_tuples=True
+            address=to_checksum_address(deployment.data_registry), abi=load_abi("DataRegistry"), decode_tuples=True
         )
         self.access = self.w3.eth.contract(
-            address=deployment.access_ledger, abi=load_abi("AccessLedger"), decode_tuples=True
+            address=to_checksum_address(deployment.access_ledger), abi=load_abi("AccessLedger"), decode_tuples=True
         )
         self.quality = self.w3.eth.contract(
-            address=deployment.quality_ledger, abi=load_abi("QualityLedger"), decode_tuples=True
+            address=to_checksum_address(deployment.quality_ledger), abi=load_abi("QualityLedger"), decode_tuples=True
         )
         self._errors = self._error_table()
         self._tx_lock = threading.Lock()
@@ -142,7 +172,7 @@ class Chain:
     def _error_table(self) -> dict[bytes, tuple[str, list[str], list[str]]]:
         table: dict[bytes, tuple[str, list[str], list[str]]] = {}
         for contract in (self.registry, self.access, self.quality):
-            for item in contract.abi:
+            for item in cast(list[dict[str, Any]], contract.abi):
                 if item.get("type") != "error":
                     continue
                 types = [i["type"] for i in item["inputs"]]
@@ -181,7 +211,7 @@ class Chain:
                 )
             except (ContractCustomError, ContractLogicError, ContractPanicError) as exc:
                 raise self.decode_error(exc) from exc
-            signed = account.sign_transaction(tx)
+            signed = account.sign_transaction(cast(dict[str, Any], tx))
             tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
         receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
         if receipt["status"] != 1:
@@ -191,6 +221,23 @@ class Chain:
     @property
     def block_number(self) -> int:
         return self.w3.eth.block_number
+
+    def is_contract(self, address: str) -> bool:
+        return len(self.w3.eth.get_code(to_checksum_address(address))) > 0
+
+    def is_valid_smart_account_signature(self, account: str, digest: bytes, signature: bytes) -> bool:
+        """ERC-1271: asks a smart account whether it accepts `signature` over `digest`."""
+        if not self.is_contract(account):
+            return False
+        wallet = self.w3.eth.contract(address=to_checksum_address(account), abi=ERC1271_ABI)
+        try:
+            return bytes(wallet.functions.isValidSignature(digest, signature).call()) == ERC1271_MAGIC
+        except (ContractCustomError, ContractLogicError, ContractPanicError, ValueError):
+            return False
+
+    def is_ready(self) -> bool:
+        """The RPC answers, is on the expected chain and the registry has code."""
+        return self.w3.eth.chain_id == self.deployment.chain_id and self.is_contract(self.deployment.data_registry)
 
     # ------------------------------------------------------------------ registry writes
 
@@ -258,6 +305,54 @@ class Chain:
         receipt = self.transact(self.access.functions.requestAccess(dataset_id, purpose), account)
         (log,) = self.access.events.AccessRequested().process_receipt(receipt, errors=DISCARD)
         return int(log["args"]["requestId"])
+
+    def access_nonce(self, account: str) -> int:
+        return int(self.call(self.access.functions.nonces(to_checksum_address(account))))
+
+    def access_request_typed_data(
+        self, dataset_id: int, requester: str, purpose: str, nonce: int, deadline: int
+    ) -> dict[str, Any]:
+        """EIP-712 payload for `requestAccessWithSig`, ready for `eth_signTypedData_v4`."""
+        return {
+            "types": ACCESS_REQUEST_TYPES,
+            "primaryType": "AccessRequest",
+            "domain": {
+                "name": ACCESS_DOMAIN_NAME,
+                "version": ACCESS_DOMAIN_VERSION,
+                "chainId": self.deployment.chain_id,
+                "verifyingContract": self.deployment.access_ledger,
+            },
+            "message": {
+                "datasetId": dataset_id,
+                "requester": to_checksum_address(requester),
+                "purpose": purpose,
+                "nonce": nonce,
+                "deadline": deadline,
+            },
+        }
+
+    def hash_access_request(self, dataset_id: int, requester: str, purpose: str, nonce: int, deadline: int) -> bytes:
+        fn = self.access.functions.hashAccessRequest(
+            dataset_id, to_checksum_address(requester), purpose, nonce, deadline
+        )
+        return bytes(self.call(fn))
+
+    def request_access_with_sig(
+        self,
+        relayer: LocalAccount,
+        dataset_id: int,
+        requester: str,
+        purpose: str,
+        deadline: int,
+        signature: bytes,
+    ) -> tuple[int, str]:
+        """Relays a signed request; the relayer pays the gas. Returns (request id, transaction hash)."""
+        fn = self.access.functions.requestAccessWithSig(
+            dataset_id, to_checksum_address(requester), purpose, deadline, signature
+        )
+        receipt = self.transact(fn, relayer)
+        (log,) = self.access.events.AccessRequested().process_receipt(receipt, errors=DISCARD)
+        return int(log["args"]["requestId"]), _hex(bytes(receipt["transactionHash"]))
 
     def approve_request(self, account: LocalAccount, request_id: int, duration_seconds: int) -> TxReceipt:
         return self.transact(self.access.functions.approveRequest(request_id, duration_seconds), account)

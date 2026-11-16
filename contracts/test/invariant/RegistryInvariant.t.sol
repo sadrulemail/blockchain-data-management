@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {DataRegistry} from "../../src/DataRegistry.sol";
 import {IDataRegistry} from "../../src/interfaces/IDataRegistry.sol";
@@ -82,7 +82,7 @@ contract RegistryInvariantTest is Test {
     function setUp() public {
         address admin = makeAddr("admin");
         address publisher = makeAddr("publisher");
-        registry = new DataRegistry(admin);
+        registry = new DataRegistry(admin, 2 days);
         bytes32 role = registry.PUBLISHER_ROLE();
         vm.prank(admin);
         registry.grantRole(role, publisher);

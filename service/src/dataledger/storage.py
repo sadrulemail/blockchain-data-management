@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import re
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 _OBJECT_ID = re.compile(r"^[0-9a-f]{64}$")
 URI_PREFIX = "dl://objects/"
@@ -41,7 +42,7 @@ def parse_object_uri(uri: str) -> str:
 
 
 class LocalObjectStore:
-    """Filesystem backend (``root/ab/cd/<id>``). S3, Azure Blob or IPFS fit the same four methods."""
+    """Filesystem backend (``root/ab/cd/<id>``). Azure Blob, GCS or IPFS fit the same four methods."""
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
@@ -80,3 +81,69 @@ class LocalObjectStore:
 
     def exists(self, object_id: str) -> bool:
         return self._path(object_id).exists()
+
+
+class S3ObjectStore:
+    """S3 or any S3-compatible service (MinIO, Ceph, R2, GCS interoperability). Keys are ``prefix/ab/cd/<id>``.
+
+    Objects are already encrypted and content-addressed, so the bucket needs no extra trust: a changed object fails
+    its hash check on read. Server-side encryption and versioning on the bucket are still recommended.
+    """
+
+    def __init__(self, bucket: str, prefix: str = "", client: Any = None, **client_kwargs: Any) -> None:
+        if client is None:
+            import boto3
+
+            client = boto3.client("s3", **{k: v for k, v in client_kwargs.items() if v})
+        self.client = client
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+
+    def _key(self, object_id: str) -> str:
+        if not _OBJECT_ID.match(object_id):
+            raise ValueError(f"malformed object id {object_id!r}")
+        key = f"{object_id[:2]}/{object_id[2:4]}/{object_id}"
+        return f"{self.prefix}/{key}" if self.prefix else key
+
+    def _missing(self, exc: Exception) -> bool:
+        code = str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+        return code in {"404", "NoSuchKey", "NotFound"}
+
+    def put(self, blob: bytes) -> str:
+        object_id = hashlib.sha256(blob).hexdigest()
+        if not self.exists(object_id):
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=self._key(object_id),
+                Body=blob,
+                ContentType="application/octet-stream",
+                ChecksumSHA256=base64.b64encode(bytes.fromhex(object_id)).decode(),
+            )
+        return object_id
+
+    def get(self, object_id: str) -> bytes:
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=self._key(object_id))
+        except Exception as exc:
+            if self._missing(exc):
+                raise ObjectNotFound(object_id) from exc
+            raise
+        blob = response["Body"].read()
+        if hashlib.sha256(blob).hexdigest() != object_id:
+            raise StorageIntegrityError(f"object {object_id} does not match its content address")
+        return blob
+
+    def delete(self, object_id: str) -> bool:
+        if not self.exists(object_id):
+            return False
+        self.client.delete_object(Bucket=self.bucket, Key=self._key(object_id))
+        return True
+
+    def exists(self, object_id: str) -> bool:
+        try:
+            self.client.head_object(Bucket=self.bucket, Key=self._key(object_id))
+        except Exception as exc:
+            if self._missing(exc):
+                return False
+            raise
+        return True

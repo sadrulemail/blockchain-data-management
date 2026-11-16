@@ -1,0 +1,6 @@
+# Repository-wide ruff settings for scripts/; the service keeps its own in service/pyproject.toml.
+extend = "service/pyproject.toml"
+src = ["scripts", "service/src"]
+
+[lint.isort]
+known-first-party = ["dataledger"]

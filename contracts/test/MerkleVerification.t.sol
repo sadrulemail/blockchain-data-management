@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {DataRegistry} from "../src/DataRegistry.sol";
 import {IDataRegistry} from "../src/interfaces/IDataRegistry.sol";

@@ -1,6 +1,6 @@
 """Copies contract ABIs from the Foundry build into the service package.
 
-Run after `forge build`; CI fails when the committed ABIs drift from the contracts.
+Run after `forge build`. `make check` fails when the committed ABIs drift from the contracts.
 """
 
 from __future__ import annotations

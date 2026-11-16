@@ -60,7 +60,7 @@ def test_key_rotation_rewraps_without_touching_object(ring):
 
 @pytest.mark.parametrize("spec", ["", "nokey", ":abc", "k1:" + "QUJD"])
 def test_key_ring_parse_errors(spec):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"key ring|32 bytes"):
         KeyRing.parse(spec)
 
 
@@ -83,7 +83,7 @@ def test_store_detects_corruption_and_missing(tmp_path):
     assert store.delete(object_id)
     with pytest.raises(ObjectNotFound):
         store.get(object_id)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="malformed object id"):
         store.get("../../etc/passwd")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="not an object URI"):
         parse_object_uri("s3://bucket/key")

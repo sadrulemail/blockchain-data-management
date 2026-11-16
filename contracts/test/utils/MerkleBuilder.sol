@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 /// @notice Builds Merkle trees the same way the off-chain service does: leaves in record order, sorted-pair keccak,
 ///         and an odd node at the end of a layer is promoted unchanged.

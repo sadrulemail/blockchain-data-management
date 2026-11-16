@@ -1,15 +1,27 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.28;
+pragma solidity 0.8.38;
 
 import {IDataRegistry} from "./interfaces/IDataRegistry.sol";
-import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {
+    AccessControlDefaultAdminRules
+} from "@openzeppelin/contracts/access/extensions/AccessControlDefaultAdminRules.sol";
+import {Multicall} from "@openzeppelin/contracts/utils/Multicall.sol";
+import {Nonces} from "@openzeppelin/contracts/utils/Nonces.sol";
+import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 
 /// @title AccessLedger
 /// @notice Consent and access control for registered datasets. Consumers request access with a stated purpose,
 ///         dataset managers approve time-boxed grants, and the data gateway records every read on-chain.
-contract AccessLedger is AccessControl {
+/// @dev Consumers can also sign a request off-chain (EIP-712) and let anyone relay it, so asking for access needs
+///      no gas. Signatures from smart accounts are checked with ERC-1271. The domain is published via ERC-5267.
+contract AccessLedger is AccessControlDefaultAdminRules, EIP712, Nonces, Multicall {
     bytes32 public constant GATEWAY_ROLE = keccak256("GATEWAY_ROLE");
     uint64 public constant MAX_GRANT_DURATION = 365 days;
+
+    /// @notice EIP-712 type of a signed access request. As EIP-712 requires, `purpose` is signed as its keccak256.
+    bytes32 public constant ACCESS_REQUEST_TYPEHASH =
+        keccak256("AccessRequest(uint256 datasetId,address requester,string purpose,uint256 nonce,uint256 deadline)");
 
     enum RequestStatus {
         None,
@@ -78,11 +90,16 @@ contract AccessLedger is AccessControl {
     error NoActiveGrant(uint256 datasetId, address account);
     error AccessDenied(uint256 datasetId, address account);
     error VersionNotServable(uint256 datasetId, uint32 version);
+    error ExpiredSignature(uint256 deadline);
+    error InvalidSignature(address requester);
 
-    constructor(IDataRegistry registry_, address admin) {
-        if (address(registry_) == address(0) || admin == address(0)) revert InvalidAccount();
+    /// @param adminTransferDelay Seconds a new admin must wait before accepting `DEFAULT_ADMIN_ROLE`.
+    constructor(IDataRegistry registry_, address admin, uint48 adminTransferDelay)
+        AccessControlDefaultAdminRules(adminTransferDelay, admin)
+        EIP712("DataLedger AccessLedger", "1")
+    {
+        if (address(registry_) == address(0)) revert InvalidAccount();
         registry = registry_;
-        _grantRole(DEFAULT_ADMIN_ROLE, admin);
     }
 
     // ---------------------------------------------------------------------------------------------------------------
@@ -90,24 +107,31 @@ contract AccessLedger is AccessControl {
     // ---------------------------------------------------------------------------------------------------------------
 
     function requestAccess(uint256 datasetId, string calldata purpose) external returns (uint256 requestId) {
-        _requireDataset(datasetId);
-        if (bytes(purpose).length == 0) revert EmptyPurpose();
-        if (hasAccess(datasetId, msg.sender)) revert AccessNotRequired(datasetId, msg.sender);
-        uint256 open = openRequestOf[datasetId][msg.sender];
-        if (open != 0) revert RequestAlreadyOpen(datasetId, msg.sender, open);
+        return _openRequest(datasetId, msg.sender, purpose);
+    }
 
-        requestId = ++requestCount;
-        bytes32 purposeHash = keccak256(bytes(purpose));
-        _requests[requestId] = AccessRequest({
-            datasetId: datasetId,
-            requester: msg.sender,
-            requestedAt: uint64(block.timestamp),
-            status: RequestStatus.Pending,
-            purposeHash: purposeHash
-        });
-        openRequestOf[datasetId][msg.sender] = requestId;
-
-        emit AccessRequested(requestId, datasetId, msg.sender, purposeHash, purpose);
+    /// @notice Opens a request on behalf of `requester`, who signed it off-chain. Anyone can relay the signature;
+    ///         the nonce makes each signature usable once and the deadline bounds how long it stays valid.
+    function requestAccessWithSig(
+        uint256 datasetId,
+        address requester,
+        string calldata purpose,
+        uint256 deadline,
+        bytes calldata signature
+    ) external returns (uint256 requestId) {
+        // Grants and signatures expire by time on purpose; a few seconds of validator drift does not matter.
+        // slither-disable-next-line timestamp
+        if (block.timestamp > deadline) revert ExpiredSignature(deadline);
+        if (requester == address(0)) revert InvalidAccount();
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ACCESS_REQUEST_TYPEHASH, datasetId, requester, keccak256(bytes(purpose)), _useNonce(requester), deadline
+            )
+        );
+        if (!SignatureChecker.isValidSignatureNowCalldata(requester, _hashTypedDataV4(structHash), signature)) {
+            revert InvalidSignature(requester);
+        }
+        return _openRequest(datasetId, requester, purpose);
     }
 
     function approveRequest(uint256 requestId, uint64 duration) external {
@@ -188,11 +212,28 @@ contract AccessLedger is AccessControl {
         if (registry.classificationOf(datasetId) == IDataRegistry.Classification.Public) return true;
         if (registry.canManage(datasetId, account)) return true;
         Grant storage g = _grants[datasetId][account];
+        // slither-disable-next-line timestamp
         return !g.revoked && g.expiresAt > block.timestamp;
     }
 
     function getGrant(uint256 datasetId, address account) external view returns (Grant memory) {
         return _grants[datasetId][account];
+    }
+
+    /// @notice The EIP-712 digest a requester signs for `requestAccessWithSig`. Lets clients and wallets check their
+    ///         encoding against the contract before they sign.
+    function hashAccessRequest(
+        uint256 datasetId,
+        address requester,
+        string calldata purpose,
+        uint256 nonce,
+        uint256 deadline
+    ) external view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(ACCESS_REQUEST_TYPEHASH, datasetId, requester, keccak256(bytes(purpose)), nonce, deadline)
+            )
+        );
     }
 
     function getRequest(uint256 requestId) external view returns (AccessRequest memory) {
@@ -204,6 +245,30 @@ contract AccessLedger is AccessControl {
     // ---------------------------------------------------------------------------------------------------------------
     // Internal
     // ---------------------------------------------------------------------------------------------------------------
+
+    function _openRequest(uint256 datasetId, address requester, string calldata purpose)
+        private
+        returns (uint256 requestId)
+    {
+        _requireDataset(datasetId);
+        if (bytes(purpose).length == 0) revert EmptyPurpose();
+        if (hasAccess(datasetId, requester)) revert AccessNotRequired(datasetId, requester);
+        uint256 open = openRequestOf[datasetId][requester];
+        if (open != 0) revert RequestAlreadyOpen(datasetId, requester, open);
+
+        requestId = ++requestCount;
+        bytes32 purposeHash = keccak256(bytes(purpose));
+        _requests[requestId] = AccessRequest({
+            datasetId: datasetId,
+            requester: requester,
+            requestedAt: uint64(block.timestamp),
+            status: RequestStatus.Pending,
+            purposeHash: purposeHash
+        });
+        openRequestOf[datasetId][requester] = requestId;
+
+        emit AccessRequested(requestId, datasetId, requester, purposeHash, purpose);
+    }
 
     function _writeGrant(uint256 datasetId, address grantee, bytes32 purposeHash, uint64 duration)
         private
@@ -223,6 +288,7 @@ contract AccessLedger is AccessControl {
 
     function _revoke(uint256 datasetId, address grantee) private {
         Grant storage g = _grants[datasetId][grantee];
+        // slither-disable-next-line timestamp
         if (g.revoked || g.expiresAt <= block.timestamp) revert NoActiveGrant(datasetId, grantee);
         g.revoked = true;
         emit AccessRevoked(datasetId, grantee, msg.sender);
