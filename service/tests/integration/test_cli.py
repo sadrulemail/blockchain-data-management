@@ -72,7 +72,7 @@ def test_publisher_consumer_and_auditor_commands(env: Env, run, tmp_path: Path):
     assert _json(run("verify-record", str(proof_file)))["valid"] is True
     assert _json(run("verify-file", "--file", str(csv)))["result"] == "exact_match"
 
-    assert "granted" in run("grant", dataset_id, env.partner.address, "Audit sample", "--days", "3", key=OWNER)
+    assert "granted" in run("grant", dataset_id, env.partner.address, "Audit review", "--days", "3", key=OWNER)
     assert "revoked" in run("revoke", dataset_id, env.partner.address, key=OWNER)
 
     run("grant", dataset_id, env.auditor.address, "Quality audit", "--days", "2", key=OWNER)
