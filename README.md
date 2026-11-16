@@ -17,7 +17,7 @@ between datasets, purpose-bound access grants, a log of every read, and independ
 | **Console** | Dependency-free web console: catalogue, versions, lineage graph, access, audit trail, verification |
 | **Operations** | Prometheus metrics and a Grafana dashboard, JSON logs with request ids, OpenTelemetry traces, liveness and readiness probes |
 | **Delivery** | Docker images for linux/amd64 and linux/arm64 with SBOM and provenance, a hardened Docker Compose stack, a Helm chart for Kubernetes |
-| **Quality gates** | 195 automated tests across both languages, end-to-end runs against a real chain on SQLite and PostgreSQL, one `make check` |
+| **Quality gates** | 196 automated tests across both languages, end-to-end runs against a real chain on SQLite and PostgreSQL, one `make check` |
 
 ---
 
@@ -657,7 +657,7 @@ uv run dataledger verify-file --file ../datasets/sales_orders_2026-10.csv
 | Golden vectors | 2 | Same records give the same Merkle root in Solidity and Python; the Python EIP-712 digest equals `hashAccessRequest` |
 | Static analysis | 0 findings | Slither (every detector, two reviewed suppressions with reasons) and `forge lint` |
 | Gas snapshot | 76 entries | `forge snapshot --check` fails when gas use changes unnoticed |
-| Python unit tests | 80 | Canonicalisation, Merkle trees, encryption, storage (filesystem and S3), EIP-712 signing and replay, migrations, logging, metrics and security headers |
+| Python unit tests | 81 | Canonicalisation, Merkle trees, encryption, storage (filesystem and S3), EIP-712 signing and replay, migrations, logging, metrics and security headers |
 | End-to-end tests | 30 | Real anvil chain per test: publish, gated reads, proofs, verification, diffs, tampering, lineage, attestations, erasure, key rotation, re-org recovery, gasless relay, smart-account signatures, batched grants, probes, metrics and every CLI command |
 | End-to-end on PostgreSQL | 30 | The same suite against PostgreSQL 18 (`make test-postgres`) |
 | Types and style | | mypy, ruff (lint and format), `forge fmt` |

@@ -114,3 +114,13 @@ def test_tracing_with_console_exporter(monkeypatch, capsys):
     provider.force_flush()
     provider.shutdown()
     assert '"name": "GET /api/items/{item_id}"' in capsys.readouterr().out
+
+
+def test_version_comes_from_the_package_metadata():
+    import tomllib
+    from pathlib import Path
+
+    import dataledger
+
+    project = tomllib.loads((Path(__file__).resolve().parents[2] / "pyproject.toml").read_text(encoding="utf-8"))
+    assert dataledger.__version__ == project["project"]["version"]

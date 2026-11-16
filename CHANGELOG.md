@@ -31,6 +31,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
   `/readyz`, security headers and a Content-Security-Policy for the console, optional CORS and HSTS.
 - Python 3.14 (3.12+ supported), web3.py 8, FastAPI 0.163, SQLAlchemy 2.1. mypy and branch coverage gates.
 - Fixed: on PostgreSQL, `records_anchored` in the overview came back as a decimal.
+- The API reports the version from the package metadata (`/api/health`, OpenAPI), not a hard-coded string.
 
 ### Delivery
 - Images are built for linux/amd64 and linux/arm64 with SBOM and provenance attestations (`docker-bake.hcl`),
